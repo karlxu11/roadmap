@@ -13,6 +13,7 @@ const ROADBOOK_KV_NAMESPACE_ID = process.env.ROADBOOK_KV_NAMESPACE_ID ?? "";
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
 const localBindingConfig = {
+  name: "roam-note-roadbook",
   main: "./worker/index.ts",
   // Keep variables and secrets configured in the Cloudflare dashboard when
   // the generated Wrangler config is deployed.
