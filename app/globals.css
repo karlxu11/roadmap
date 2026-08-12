@@ -202,3 +202,14 @@ button { cursor: pointer; }
   .mobile-navigation-button:hover { border-color: #2a4a40; background: #2a4a40; color: #fff; }
   .stop-navigation-button { display: inline-flex; align-items: center; width: fit-content; margin-top: 8px; padding: 5px 9px; border: 1px solid #e0cbb9; border-radius: 5px; background: #fff8f0; color: #b27451; font-size: 10px; font-weight: 700; text-decoration: none; }
 }
+
+/* Desktop: keep the header fixed and let the two editing areas scroll independently. */
+@media screen and (min-width: 1121px) {
+  html, body { height: 100%; overflow: hidden; }
+  .app-shell { height: 100vh; min-height: 0; display: flex; flex-direction: column; }
+  .workspace { flex: 1; min-height: 0; height: auto; overflow: hidden; }
+  .sidebar, .editor-pane { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
+  .sidebar { overflow-x: hidden; }
+  .sidebar .day-list { overflow: visible; }
+  .editor-pane { overflow-x: hidden; }
+}
