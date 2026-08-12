@@ -86,7 +86,7 @@ button { cursor: pointer; }
 .read-only-view .departure-date, .read-only-view .departure-time { border-color: #e5e8e0; background: #fafbf7; }
 .leg-summary { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 0 0 5px; color: #a1aaa0; font-size: 11px; line-height: 1.45; }
 .leg-summary > span:first-child { color: var(--orange); font-size: 14px; }
-.leg-summary .leg-arrival { margin-left: 5px; color: #b07f5d; font-size: 11px; font-weight: 700; }
+.stop-arrival { margin: 0 0 5px; color: #b07f5d; font-size: 11px; font-weight: 700; }
 .departure-time { width: 96px; padding: 7px 8px; border: 1px solid #e5a486; border-radius: 4px; outline: 0; background: #fffaf3; color: #8c978d; font: inherit; font-size: 13px; }
 .departure-time:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(220, 107, 63, .12); }
 .trip-total-summary { display: flex; align-items: baseline; gap: 10px; margin: 7px 0 19px 47px; padding: 12px 13px; border-left: 2px solid #d7e1d2; background: #f8faf5; color: #8b978c; font-size: 12px; }

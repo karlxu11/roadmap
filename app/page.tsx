@@ -470,18 +470,20 @@ export default function Home() {
   const routeDuration = routeSummary ? formatDuration(routeSummary.duration) : readOnly ? "未记录" : mapReady ? "正在计算" : "待规划";
   const departureStop = selectedDay.stops.find((stop) => stop.kind === "出发");
   const departureTime = departureStop ? extractClock(departureStop.duration) : "09:00";
-  const legArrivalTimes = useMemo(() => {
+  const stopArrivalTimes = useMemo(() => {
     let elapsedSeconds = 0;
     let canCalculate = true;
-    return selectedDay.stops.slice(0, -1).map((stop) => {
+    const arrivalTimes = selectedDay.stops.map(() => "");
+    selectedDay.stops.slice(0, -1).forEach((stop, index) => {
       const metric = displayLegMetrics[stop.id];
       if (!canCalculate || metric?.status !== "ready" || typeof metric.duration !== "number") {
         canCalculate = false;
-        return "";
+        return;
       }
       elapsedSeconds += metric.duration;
-      return addDurationToClock(departureTime, elapsedSeconds);
+      arrivalTimes[index + 1] = addDurationToClock(departureTime, elapsedSeconds);
     });
+    return arrivalTimes;
   }, [departureTime, displayLegMetrics, selectedDay.stops]);
   const selectedDayDate = parseMonthDay(selectedDay.date);
   const roadbookYear = starterTrip.title.match(/20\d{2}/)?.[0] ?? String(new Date().getFullYear());
@@ -1069,7 +1071,8 @@ export default function Home() {
                       <div>
                         <div className="stop-kicker"><span className={`kind-pill ${stop.kind === "住宿" ? "green" : stop.kind === "出发" ? "orange" : ""}`}>{stop.kind}</span>{stop.kind === "出发" ? <input className="departure-time" readOnly={readOnly} disabled={readOnly} type="time" value={extractClock(stop.duration)} aria-label={`修改${stop.name}出发时间`} onChange={(event) => updateDepartureTime(stop.id, event.target.value)} /> : <span>{stop.duration}</span>}</div>
                         <h3>{stop.name}</h3>
-                        {index < selectedDay.stops.length - 1 && <div className="leg-summary"><span>↘</span>{displayLegMetrics[stop.id]?.status === "loading" ? "正在计算路线…" : displayLegMetrics[stop.id]?.status === "ready" ? <>约 {formatDistance(displayLegMetrics[stop.id].distance)} · {formatDuration(displayLegMetrics[stop.id].duration)}{legArrivalTimes[index] && <span className="leg-arrival"> · 预计 {legArrivalTimes[index]} 到达{selectedDay.stops[index + 1].name}</span>}</> : readOnly ? "分享时未记录该路段" : "路线距离待加载"}</div>}
+                        {stopArrivalTimes[index] && <div className="stop-arrival">预计 {stopArrivalTimes[index]} 到达{stop.name}</div>}
+                        {index < selectedDay.stops.length - 1 && <div className="leg-summary"><span>↘</span>{displayLegMetrics[stop.id]?.status === "loading" ? "正在计算路线…" : displayLegMetrics[stop.id]?.status === "ready" ? <>约 {formatDistance(displayLegMetrics[stop.id].distance)} · {formatDuration(displayLegMetrics[stop.id].duration)}</> : readOnly ? "分享时未记录该路段" : "路线距离待加载"}</div>}
                         <a className="stop-navigation-button" href={amapStopNavigationUrl(stop)} target="_blank" rel="noreferrer">导航到这里 ↗</a>
                       </div>
                       {!readOnly && <div className="stop-tools">{stop.kind !== "出发" && <button className="set-departure-button" type="button" onClick={() => setStopAsDeparture(stop.id)} aria-label={`将${stop.name}设为出发点`}>设为出发</button>}<button type="button" onClick={() => moveStop(stop.id, -1)} aria-label="上移地点">↑</button><button type="button" onClick={() => moveStop(stop.id, 1)} aria-label="下移地点">↓</button><button type="button" onClick={() => removeStop(stop.id)} aria-label="删除地点">×</button></div>}
