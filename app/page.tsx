@@ -1000,6 +1000,7 @@ export default function Home() {
   const mapStops = selectedDay.stops;
   const sharedRoutePath = useMemo(() => readOnly ? sharedSnapshot?.paths?.[routeCacheKey(mapStops)] ?? [] : [], [mapStops, readOnly, sharedSnapshot]);
   const sharedMapProjection = useMemo(() => projectRoutePath(sharedRoutePath, mapStops), [mapStops, sharedRoutePath]);
+  const storageStatusLabel = storageStatus === "remote" ? "已同步到云端" : storageStatus === "saving" ? "正在保存到云端" : storageStatus === "loading" ? "正在连接云端" : "云端存储未配置";
 
   return (
     <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""}`}>
@@ -1012,7 +1013,7 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          {readOnly ? <div className="share-mode-label"><span>只读分享</span><small>路径 · 费用 · 时间已记录</small></div> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="trip-status" type="button" onClick={saveTrip}><span className="status-dot" /> {starterTrip.updated} <span className="chevron">⌄</span></button><button className="icon-button" type="button" aria-label="打开高德配置" onClick={() => setShowSettings(true)}>⚙</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
+          {readOnly ? <div className="share-mode-label"><span>只读分享</span><small>路径 · 费用 · 时间已记录</small></div> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
         </div>
       </header>
 
@@ -1045,7 +1046,6 @@ export default function Home() {
           </div>
 
           {!readOnly && <button className="add-day-button" type="button" onClick={() => insertDay(days.at(-1)?.id)}><span>＋</span> 在行程末尾添加一天</button>}
-          <div className="sidebar-bottom"><span className="tiny-icon">{readOnly ? "◷" : storageStatus === "remote" ? "☁" : storageStatus === "saving" ? "↻" : "◎"}</span><span>{readOnly ? `分享于 ${new Date(sharedSnapshot?.createdAt ?? Date.now()).toLocaleDateString("zh-CN")}` : storageStatus === "remote" ? "已同步到云端" : storageStatus === "saving" ? "正在保存到云端" : storageStatus === "loading" ? "正在连接云端" : "云端存储未配置"}</span>{!readOnly && <button type="button" onClick={() => setShowSettings(true)}>配置地图</button>}</div>
         </aside>
 
         <section className="editor-pane">

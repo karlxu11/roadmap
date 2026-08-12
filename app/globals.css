@@ -20,6 +20,10 @@ button { cursor: pointer; }
 .library-button span { margin-left: 4px; color: var(--orange); }
 .new-roadbook-button { border: 1px solid #d8a487; background: #fff7ef; color: var(--orange); }
 .new-roadbook-button:hover { background: #fff0e3; }
+.sync-status { display: inline-flex; align-items: center; height: 32px; padding: 0; border: 0; background: transparent; color: #89938a; font-size: 10px; white-space: nowrap; }
+.sync-status:hover { color: var(--deep); }
+.map-settings-button { height: 32px; padding: 0 10px; border: 1px solid #d7e1d2; border-radius: 6px; background: #f6faf3; color: var(--green); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.map-settings-button:hover { border-color: #a9bea3; background: #edf5e9; color: var(--deep); }
 .trip-status, .icon-button, .avatar { border: 0; background: transparent; color: #78837a; }
 .trip-status { font-size: 11px; letter-spacing: .03em; }
 .status-dot, .live-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #9eb19b; }
@@ -212,4 +216,10 @@ button { cursor: pointer; }
   .sidebar { overflow-x: hidden; }
   .sidebar .day-list { overflow: visible; }
   .editor-pane { overflow-x: hidden; }
+}
+
+@media screen and (max-width: 760px) {
+  .sync-status { display: none; }
+  .map-settings-button { width: 32px; padding: 0; font-size: 0; }
+  .map-settings-button::before { content: "⚙"; font-size: 16px; }
 }
