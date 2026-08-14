@@ -2,6 +2,7 @@
 /* eslint-disable jsx-a11y/no-autofocus -- the note editor opens for immediate keyboard entry. */
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import Link from "next/link";
 import { initialDays as importedDays } from "./roadbook-data";
 
 type StopKind = "出发" | "途经" | "住宿" | "景点";
@@ -332,6 +333,10 @@ function hasShareQuery() {
   return typeof window !== "undefined" && new URLSearchParams(window.location.search).has(SHARE_QUERY_KEY);
 }
 
+function isCloudShareToken(value: string) {
+  return /^[A-Za-z0-9_-]{16,64}$/.test(value);
+}
+
 function expectedShareLegCount(roadbook: Roadbook) {
   return roadbook.days.reduce((count, day) => count + Math.max(day.stops.length - 1, 0), 0);
 }
@@ -578,6 +583,7 @@ export default function Home() {
   const starterTrip = activeRoadbook;
   const days = activeRoadbook.days;
   const [sharedSnapshot, setSharedSnapshot] = useState<SharedSnapshot | null>(null);
+  const [shareLoadError, setShareLoadError] = useState(false);
   const readOnly = Boolean(sharedSnapshot);
   const [selectedDayId, setSelectedDayId] = useState(() => defaultRoadbook().days[0].id);
   const [query, setQuery] = useState("");
@@ -698,13 +704,20 @@ export default function Home() {
     if (hasShareQuery()) {
       const encodedShare = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get(SHARE_QUERY_KEY) ?? "";
       const inlineShare = decodeShareSnapshot(encodedShare);
-      const canPollShare = Boolean(encodedShare && !inlineShare);
+      const canPollShare = Boolean(encodedShare && !inlineShare && isCloudShareToken(encodedShare));
       let applied = false;
       let pollAttempts = 0;
       let pollTimer: number | null = null;
       const applySharedSnapshot = (fromShare: SharedSnapshot | null) => {
         if (cancelled || !fromShare) {
-          if (!cancelled) setStorageStatus("unavailable");
+          if (!cancelled) {
+            setStorageStatus("unavailable");
+            setShareLoadError(true);
+            if (pollTimer !== null) {
+              window.clearInterval(pollTimer);
+              pollTimer = null;
+            }
+          }
           return;
         }
         setSharedSnapshot(fromShare);
@@ -1408,6 +1421,10 @@ export default function Home() {
   const sharedRoutePath = useMemo(() => readOnly ? sharedSnapshot?.paths?.[routeCacheKey(mapStops)] ?? [] : [], [mapStops, readOnly, sharedSnapshot]);
   const sharedMapProjection = useMemo(() => projectRoutePath(sharedRoutePath, mapStops), [mapStops, sharedRoutePath]);
   const storageStatusLabel = storageStatus === "remote" ? "已同步到云端" : storageStatus === "saving" ? "正在保存到云端" : storageStatus === "loading" ? "正在连接云端" : "云端存储未配置";
+
+  if (shareLoadError) {
+    return <main className="share-error-page"><div className="share-error-card"><div className="brand-mark" aria-hidden="true">路</div><div className="eyebrow">SHARE LINK UNAVAILABLE</div><h1>分享链接无效</h1><p>链接可能被截短、已过期，或已经被创建者撤销。请向分享者重新获取完整链接。</p><Link className="primary-button" href="/">返回首页 <span>→</span></Link></div></main>;
+  }
 
   return (
     <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""}`}>

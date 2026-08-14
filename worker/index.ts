@@ -251,8 +251,31 @@ function isPublicAssetPath(pathname: string) {
   return pathname.startsWith("/_next/") || pathname.startsWith("/_vinext/") || pathname === "/favicon.svg" || pathname === "/favicon.ico";
 }
 
-function isPublicShareRequest(url: URL, method: string) {
-  return method === "GET" && ((url.pathname === "/" && url.searchParams.has("share")) || (url.pathname === "/api/shares" && url.searchParams.has("token")) || url.pathname === "/api/amap-config");
+function isShareToken(value: string) {
+  return /^[A-Za-z0-9_-]{16,64}$/.test(value);
+}
+
+function isInlineShareSnapshot(value: string) {
+  try {
+    const base64 = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    return isShareSnapshot(JSON.parse(new TextDecoder().decode(bytes)));
+  } catch {
+    return false;
+  }
+}
+
+async function isPublicShareRequest(url: URL, method: string, env: Env) {
+  if (method !== "GET") return false;
+  if (url.pathname === "/api/amap-config") return true;
+
+  const parameter = url.pathname === "/" ? url.searchParams.get("share") : url.pathname === "/api/shares" ? url.searchParams.get("token") : null;
+  if (!parameter) return false;
+  if (url.pathname === "/" && isInlineShareSnapshot(parameter)) return true;
+  if (!isShareToken(parameter) || !env.ROADBOOK_KV) return false;
+
+  const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${parameter}`, "json");
+  return isShareSnapshot(snapshot);
 }
 
 async function isAuthorized(request: Request, password: string) {
@@ -293,7 +316,7 @@ const worker = {
       return Response.json({ ok: true }, { headers: { "Set-Cookie": `${ACCESS_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0` } });
     }
 
-    if (configuredPassword && !isPublicAssetPath(url.pathname) && !isPublicShareRequest(url, request.method) && !await isAuthorized(request, configuredPassword)) return passwordPage();
+    if (configuredPassword && !isPublicAssetPath(url.pathname) && !await isPublicShareRequest(url, request.method, env) && !await isAuthorized(request, configuredPassword)) return passwordPage();
 
     if (url.pathname === "/api/shares" && request.method === "POST") {
       if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503 });

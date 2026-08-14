@@ -19,6 +19,12 @@ button { cursor: pointer; }
 .library-button { border: 1px solid var(--line); background: transparent; color: #6f7c71; }
 .library-button span { margin-left: 4px; color: var(--orange); }
 .share-manager-button { height: 32px; padding: 0 10px; border: 1px solid #d7e1d2; border-radius: 6px; background: #f6faf3; color: var(--green); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.share-error-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #f6f6f1; color: var(--deep); }
+.share-error-card { width: min(430px, 100%); padding: 36px; border: 1px solid #e3e6dc; border-radius: 16px; background: #fffdf8; box-shadow: 0 18px 45px rgba(30,50,42,.08); }
+.share-error-card .brand-mark { margin-bottom: 25px; }
+.share-error-card h1 { margin: 12px 0 10px; font-family: Georgia, serif; font-size: 28px; font-weight: 500; }
+.share-error-card p { margin: 0 0 25px; color: #8b958c; font-size: 12px; line-height: 1.8; }
+.share-error-card .primary-button { display: inline-flex; text-decoration: none; }
 .share-manager-button:hover { border-color: #a9bea3; background: #edf5e9; color: var(--deep); }
 .new-roadbook-button { border: 1px solid #d8a487; background: #fff7ef; color: var(--orange); }
 .new-roadbook-button:hover { background: #fff0e3; }

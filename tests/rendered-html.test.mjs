@@ -90,9 +90,16 @@ test("share pages bypass the editor password", async () => {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("share-auth", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
+  const snapshot = { version: 1, roadbook: { days: [] }, legs: {}, createdAt: new Date().toISOString() };
+  const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  const inlineToken = btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
   const env = { SITE_PASSWORD: "secret", ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
-  const shareResponse = await worker.fetch(new Request("http://localhost/?share=abcdefghijklmnop"), env, { waitUntil() {}, passThroughOnException() {} });
+  const shareResponse = await worker.fetch(new Request(`http://localhost/?share=${inlineToken}`), env, { waitUntil() {}, passThroughOnException() {} });
   assert.equal(shareResponse.status, 200);
+  const invalidShareResponse = await worker.fetch(new Request("http://localhost/?share=short"), env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(invalidShareResponse.status, 401);
   const mapConfigResponse = await worker.fetch(new Request("http://localhost/api/amap-config"), env, { waitUntil() {}, passThroughOnException() {} });
   assert.equal(mapConfigResponse.status, 200);
   const editorResponse = await worker.fetch(new Request("http://localhost/"), env, { waitUntil() {}, passThroughOnException() {} });
