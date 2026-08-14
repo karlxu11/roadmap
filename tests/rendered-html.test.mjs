@@ -82,6 +82,8 @@ test("share pages bypass the editor password", async () => {
   const env = { SITE_PASSWORD: "secret", ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
   const shareResponse = await worker.fetch(new Request("http://localhost/?share=abcdefghijklmnop"), env, { waitUntil() {}, passThroughOnException() {} });
   assert.equal(shareResponse.status, 200);
+  const mapConfigResponse = await worker.fetch(new Request("http://localhost/api/amap-config"), env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(mapConfigResponse.status, 200);
   const editorResponse = await worker.fetch(new Request("http://localhost/"), env, { waitUntil() {}, passThroughOnException() {} });
   assert.equal(editorResponse.status, 401);
 });

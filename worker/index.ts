@@ -234,7 +234,7 @@ function isPublicAssetPath(pathname: string) {
 }
 
 function isPublicShareRequest(url: URL, method: string) {
-  return method === "GET" && ((url.pathname === "/" && url.searchParams.has("share")) || (url.pathname === "/api/shares" && url.searchParams.has("token")));
+  return method === "GET" && ((url.pathname === "/" && url.searchParams.has("share")) || (url.pathname === "/api/shares" && url.searchParams.has("token")) || url.pathname === "/api/amap-config");
 }
 
 async function isAuthorized(request: Request, password: string) {

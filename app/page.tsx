@@ -737,7 +737,6 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (hasShareQuery()) return;
     fetch("/api/amap-config")
       .then((response) => response.ok ? response.json() as Promise<{ jsKey?: string; securityCode?: string; webKey?: string }> : null)
       .then((remote) => {
@@ -752,7 +751,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (hasShareQuery() || !settings.jsKey || !mapContainer.current) return;
+    if (!settings.jsKey || !mapContainer.current) return;
     window._AMapSecurityConfig = { securityJsCode: settings.securityCode };
     const existing = document.querySelector<HTMLScriptElement>('script[data-amap="roadbook"]');
     if (existing) {
@@ -770,9 +769,10 @@ export default function Home() {
   }, [settings.jsKey, settings.securityCode]);
 
   useEffect(() => {
-    if (readOnly || hasShareQuery() || storageStatus === "loading" || !amapLoaded || !window.AMap || !mapContainer.current) return;
+    if (storageStatus === "loading" || !amapLoaded || !window.AMap || !mapContainer.current) return;
     const AMap = window.AMap;
     const routeKey = routeCacheKey(selectedDay.stops);
+    const sharedPath = readOnly ? sharedSnapshot?.paths?.[routeKey] ?? [] : [];
     try {
       if (!mapRef.current) {
         mapRef.current = new AMap.Map(mapContainer.current, {
@@ -795,7 +795,9 @@ export default function Home() {
       }));
       map.setFitView(markersRef.current);
       if (selectedDay.stops.length >= 2) {
-        const cachedPath = routeCacheRef.current.paths[routeKey] ?? combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path));
+        const cachedPath = sharedPath.length >= 2
+          ? sharedPath
+          : routeCacheRef.current.paths[routeKey] ?? combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path));
         if (cachedPath?.length) {
           if (!routeCacheRef.current.paths[routeKey]) {
             routeCacheRef.current.paths[routeKey] = cachedPath;
@@ -817,7 +819,7 @@ export default function Home() {
       markersRef.current.forEach((marker) => marker.setMap(null));
       routeLineRef.current?.setMap(null);
     };
-  }, [amapLoaded, readOnly, routeCacheVersion, selectedDay, storageStatus]);
+  }, [amapLoaded, readOnly, routeCacheVersion, selectedDay, sharedSnapshot, storageStatus]);
 
   useEffect(() => {
     if (readOnly || hasShareQuery() || storageStatus === "loading" || !amapLoaded || !window.AMap) {
@@ -1357,7 +1359,7 @@ export default function Home() {
             <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
-          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div><span className="stat-label">当日路段</span><strong>{Math.max(selectedDay.stops.length - 1, 0)} 段</strong></div><div className="route-state"><span className={mapReady ? "live-dot" : ""} /> {readOnly ? "分享快照 · 未调用高德" : mapReady ? "高德路线已接入" : "示例路线预览"}</div></div>
+          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div><span className="stat-label">当日路段</span><strong>{Math.max(selectedDay.stops.length - 1, 0)} 段</strong></div><div className="route-state"><span className={mapReady ? "live-dot" : ""} /> {readOnly ? (mapReady ? "高德地图已接入" : "正在加载高德地图") : mapReady ? "高德路线已接入" : "示例路线预览"}</div></div>
 
           <div className="stops-section">
             <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "这是一个只读分享快照，路径、费用和时间已固定" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
@@ -1397,7 +1399,7 @@ export default function Home() {
         <div className={`split-divider ${isResizing ? "dragging" : ""}`} role="separator" aria-orientation="vertical" aria-label="调整编辑区和地图宽度" aria-valuemin={32} aria-valuemax={68} aria-valuenow={Math.round(editorWidth)} onPointerDown={startResize} onPointerMove={(event) => isResizing && updateEditorWidth(event.clientX)} onPointerUp={finishResize} onPointerCancel={finishResize}><span>⋮</span></div>
 
         <section className="map-panel">
-          <div className="map-topbar"><div><span className="map-label">{readOnly ? "ROUTE SNAPSHOT / READ ONLY" : "LIVE MAP / AMAP"}</span><strong>{selectedDay.title}</strong></div>{!readOnly && <button className="map-control" type="button" onClick={() => setShowSettings(true)}>{settings.jsKey ? "已连接" : "连接高德"} <span>↗</span></button>}</div>
+          <div className="map-topbar"><div><span className="map-label">LIVE MAP / AMAP</span><strong>{selectedDay.title}</strong></div>{!readOnly && <button className="map-control" type="button" onClick={() => setShowSettings(true)}>{settings.jsKey ? "已连接" : "连接高德"} <span>↗</span></button>}</div>
           <div className={`map-wrap ${mapReady ? "has-amap" : ""}`}>
             <div className="map-fallback" aria-label="路线示意图">
               <div className="map-grid" />
@@ -1408,11 +1410,11 @@ export default function Home() {
               {mapStops.map((stop, index) => { const point = sharedRoutePath.length > 1 ? sharedMapProjection.markers[index] : { x: 18 + (index * 29), y: 66 - (index * 17) }; return <div key={stop.id} className="fallback-marker" style={{ left: `${point.x}%`, top: `${point.y}%` }}><span>{index + 1}</span><label>{stop.name}</label></div>; })}
               <div className="map-coordinates"><span>30°03′N</span><span>101°58′E</span></div>
               <div className="map-compass">N<br /><span>✦</span></div>
-              {readOnly ? <div className="snapshot-map-badge">分享前已记录路线 · 未调用高德</div> : !settings.jsKey && <div className="map-message"><span className="map-message-icon">⌖</span><strong>接入高德地图，查看真实路线</strong><p>先用示例地图编辑路书，填入 Key 后即可切换到高德地图。</p><button type="button" onClick={() => setShowSettings(true)}>去设置 Key <span>→</span></button></div>}
+              {!settings.jsKey && <div className="map-message"><span className="map-message-icon">⌖</span><strong>接入高德地图，查看真实路线</strong><p>当前分享页暂时无法加载高德地图底图。</p>{!readOnly && <button type="button" onClick={() => setShowSettings(true)}>去设置 Key <span>→</span></button>}</div>}
             </div>
             <div className="map-host" ref={mapContainer} />
           </div>
-          <div className="map-bottom"><div className="legend"><span><i className="legend-dot orange" />行程地点</span><span><i className="legend-dot green" />住宿</span></div>{!readOnly && <a href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">在高德中导航 ↗</a>}</div>
+          <div className="map-bottom"><div className="legend"><span><i className="legend-dot orange" />行程地点</span><span><i className="legend-dot green" />住宿</span></div><a href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">在高德中导航 ↗</a></div>
         </section>
       </div>
 
