@@ -1156,7 +1156,8 @@ export default function Home() {
       if (day.stops.length < 2) return [];
       const key = routeCacheKey(day.stops);
       const path = routeCacheRef.current.paths[key] ?? combineRoutePaths(day.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])]?.path));
-      return path.length >= 2 ? [[key, sampleRoutePath(path)]] : [];
+      const fallbackPath = day.stops.map((stop) => [stop.lng, stop.lat] as [number, number]);
+      return [[key, sampleRoutePath(path.length >= 2 ? path : fallbackPath)]];
     }));
   }
 

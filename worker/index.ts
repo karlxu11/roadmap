@@ -155,6 +155,16 @@ async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnaps
     const stops = day.stops ?? [];
     return stops.length >= 2 && !snapshot.paths?.[shareRouteKey(stops)];
   });
+  if (daysNeedingPath.length) {
+    snapshot.paths = {
+      ...(snapshot.paths ?? {}),
+      ...Object.fromEntries(daysNeedingPath.map((day) => [
+        shareRouteKey(day.stops ?? []),
+        (day.stops ?? []).map((stop) => [Number(stop.lng), Number(stop.lat)] as [number, number]),
+      ])),
+    };
+    await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
+  }
   const tasks = snapshot.roadbook.days.flatMap((day) => (day.stops ?? []).slice(0, -1).flatMap((from, index) => {
     const to = day.stops?.[index + 1];
     if (!from.id || !to || typeof from.lng !== "number" || typeof from.lat !== "number" || typeof to.lng !== "number" || typeof to.lat !== "number") return [];
