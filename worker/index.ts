@@ -1,6 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { inputTipsToPois, rankAmapPois } from "./amap-search";
 
 interface Env {
   ASSETS: Fetcher;
@@ -33,7 +34,7 @@ const SHARE_LINK_TTL = 60 * 60 * 24 * 30;
 const AMAP_ROUTE_CACHE_TTL = 60 * 60 * 24;
 const AMAP_ROUTE_CACHE_PREFIX = "amap-route-v1:";
 const AMAP_SEARCH_CACHE_TTL = 60 * 10;
-const AMAP_SEARCH_CACHE_PREFIX = "amap-search-v1:";
+const AMAP_SEARCH_CACHE_PREFIX = "amap-search-v2:";
 
 type NormalizedRoute = {
   status: "1";
@@ -458,25 +459,69 @@ const worker = {
 
     if (url.pathname === "/api/amap/search" && request.method === "GET") {
       const keyword = url.searchParams.get("keywords")?.trim() ?? "";
+      const city = url.searchParams.get("city")?.trim().slice(0, 80) ?? "";
+      const location = normalizeCoordinate(url.searchParams.get("location"));
       const webServiceKey = env.AMAP_WEB_SERVICE_KEY?.trim();
       if (!keyword) return Response.json({ status: "0", info: "keywords is required", pois: [] }, { status: 400 });
       if (!webServiceKey) return Response.json({ status: "0", info: "web service key is not configured", pois: [] }, { status: 503 });
-      const searchCacheKey = `${AMAP_SEARCH_CACHE_PREFIX}${keyword.replace(/\s+/g, " ").toLocaleLowerCase()}`;
+      const searchCacheKey = `${AMAP_SEARCH_CACHE_PREFIX}${keyword.replace(/\s+/g, " ").toLocaleLowerCase()}|${city.toLocaleLowerCase()}|${location ?? "national"}`;
       if (env.ROADBOOK_KV) {
         const cached = await env.ROADBOOK_KV.get(searchCacheKey, "json") as AMapSearchPayload | null;
         if (cached) return Response.json(cached, { headers: { "Cache-Control": `public, max-age=${AMAP_SEARCH_CACHE_TTL}`, "X-Search-Cache": "HIT" } });
       }
 
-      const searchUrl = new URL("https://restapi.amap.com/v3/place/text");
-      searchUrl.searchParams.set("key", webServiceKey);
-      searchUrl.searchParams.set("keywords", keyword);
-      searchUrl.searchParams.set("offset", "20");
-      searchUrl.searchParams.set("page", "1");
-      searchUrl.searchParams.set("extensions", "all");
-      searchUrl.searchParams.set("citylimit", "false");
-      const response = await fetch(searchUrl);
-      if (!response.ok) return Response.json({ status: "0", info: "amap search failed", pois: [] }, { status: 502 });
-      const payload = await response.json() as AMapSearchPayload;
+      const textUrl = new URL("https://restapi.amap.com/v3/place/text");
+      textUrl.searchParams.set("key", webServiceKey);
+      textUrl.searchParams.set("keywords", keyword);
+      textUrl.searchParams.set("offset", "25");
+      textUrl.searchParams.set("page", "1");
+      textUrl.searchParams.set("extensions", "all");
+      textUrl.searchParams.set("citylimit", "false");
+      if (city) textUrl.searchParams.set("city", city);
+
+      const requests: Array<Promise<{ kind: "text" | "around" | "tips"; response: Response }>> = [
+        fetch(textUrl).then((response) => ({ kind: "text", response })),
+      ];
+      if (location) {
+        const aroundUrl = new URL("https://restapi.amap.com/v3/place/around");
+        aroundUrl.searchParams.set("key", webServiceKey);
+        aroundUrl.searchParams.set("keywords", keyword);
+        aroundUrl.searchParams.set("location", location);
+        aroundUrl.searchParams.set("radius", "50000");
+        aroundUrl.searchParams.set("sortrule", "weight");
+        aroundUrl.searchParams.set("offset", "25");
+        aroundUrl.searchParams.set("page", "1");
+        aroundUrl.searchParams.set("extensions", "all");
+        requests.push(fetch(aroundUrl).then((response) => ({ kind: "around", response })));
+      }
+      if (city || location) {
+        const tipsUrl = new URL("https://restapi.amap.com/v3/assistant/inputtips");
+        tipsUrl.searchParams.set("key", webServiceKey);
+        tipsUrl.searchParams.set("keywords", keyword);
+        tipsUrl.searchParams.set("datatype", "poi");
+        tipsUrl.searchParams.set("citylimit", "false");
+        if (city) tipsUrl.searchParams.set("city", city);
+        if (location) tipsUrl.searchParams.set("location", location);
+        requests.push(fetch(tipsUrl).then((response) => ({ kind: "tips", response })));
+      }
+
+      const settled = await Promise.allSettled(requests);
+      const batches: Array<{ pois: unknown[]; sourcePriority: number }> = [];
+      let successfulUpstream = false;
+      for (const result of settled) {
+        if (result.status !== "fulfilled" || !result.value.response.ok) continue;
+        const payload = await result.value.response.json() as AMapSearchPayload & { tips?: unknown[] };
+        if (payload.status !== "1") continue;
+        successfulUpstream = true;
+        if (result.value.kind === "tips") {
+          batches.push({ pois: inputTipsToPois(payload), sourcePriority: 3 });
+        } else {
+          batches.push({ pois: Array.isArray(payload.pois) ? payload.pois : [], sourcePriority: result.value.kind === "around" ? 3 : 1 });
+        }
+      }
+      if (!successfulUpstream) return Response.json({ status: "0", info: "amap search failed", pois: [] }, { status: 502 });
+
+      const payload = { status: "1", info: "OK", pois: rankAmapPois(batches, keyword) } satisfies AMapSearchPayload;
       if (env.ROADBOOK_KV) ctx.waitUntil(env.ROADBOOK_KV.put(searchCacheKey, JSON.stringify(payload), { expirationTtl: AMAP_SEARCH_CACHE_TTL }));
       return Response.json(payload, { headers: { "Cache-Control": `public, max-age=${AMAP_SEARCH_CACHE_TTL}`, "X-Search-Cache": env.ROADBOOK_KV ? "MISS" : "BYPASS" } });
     }

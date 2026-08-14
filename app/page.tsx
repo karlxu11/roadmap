@@ -54,8 +54,8 @@ type ShareLink = {
 };
 
 type SearchLocation = { lng?: number; lat?: number; getLng?: () => number; getLat?: () => number };
-type SearchResult = { id: string; name: string; address: string; location?: { lng: number; lat: number }; type: string };
-type AMapWebSearchPoi = { id?: string; name?: string; address?: string; location?: string; type?: string; pname?: string; cityname?: string; adname?: string };
+type SearchResult = { id: string; name: string; address: string; location?: { lng: number; lat: number }; type: string; distance?: number };
+type AMapWebSearchPoi = { id?: string; name?: string; address?: string; location?: string; type?: string; pname?: string; cityname?: string; adname?: string; distance?: number | string };
 type AMapWebSearchPayload = { status?: string; info?: string; pois?: AMapWebSearchPoi[] };
 
 type AMapInstance = {
@@ -84,6 +84,8 @@ type AMapDriving = {
   clear: () => void;
 };
 type AMapPlaceSearch = {
+  setCity?: (city: string) => void;
+  setCityLimit?: (cityLimit: boolean) => void;
   search: (keyword: string, callback: (status: string, result: { poiList?: { pois?: Array<{ id?: string; name: string; address?: string; location?: SearchLocation; type?: string }> } }) => void) => void;
 };
 
@@ -407,6 +409,15 @@ function normalizeSearchLocation(location?: SearchLocation | string) {
   return typeof lng === "number" && Number.isFinite(lng) && typeof lat === "number" && Number.isFinite(lat) ? { lng, lat } : undefined;
 }
 
+function searchContextStop(day: DayPlan) {
+  return [...day.stops].reverse().find((stop) => stop.area !== "点击右侧搜索添加" && !stop.name.startsWith("添加一个")) ?? day.stops.at(-1);
+}
+
+function searchCityHint(stop?: Stop) {
+  if (!stop) return "";
+  return stop.area.split("·")[0]?.trim() ?? "";
+}
+
 function formatMonthDay(date: Date) {
   return `${date.getMonth() + 1} 月 ${date.getDate()} 日`;
 }
@@ -538,6 +549,14 @@ function makeInsertedDay(afterDay: DayPlan): DayPlan {
 function formatDistance(meters?: number) {
   if (typeof meters !== "number" || !Number.isFinite(meters)) return "待计算";
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} 公里` : `${Math.round(meters)} 米`;
+}
+
+function formatSearchResultMeta(result: SearchResult) {
+  const parts = [result.address, result.type];
+  if (typeof result.distance === "number" && Number.isFinite(result.distance)) {
+    parts.push(`距行程参考点 ${formatDistance(result.distance)}`);
+  }
+  return parts.join(" · ");
 }
 
 function formatDuration(seconds?: number) {
@@ -1119,7 +1138,10 @@ export default function Home() {
     if (readOnly) return;
     const keyword = rawKeyword.trim();
     if (!keyword) return;
-    const searchKey = keyword.replace(/\s+/g, " ").toLocaleLowerCase();
+    const contextStop = searchContextStop(selectedDay);
+    const cityHint = searchCityHint(contextStop);
+    const locationHint = contextStop ? `${contextStop.lng.toFixed(6)},${contextStop.lat.toFixed(6)}` : "";
+    const searchKey = `${keyword.replace(/\s+/g, " ").toLocaleLowerCase()}|${cityHint.toLocaleLowerCase()}|${locationHint}`;
     const requestId = searchRequestIdRef.current + 1;
     searchRequestIdRef.current = requestId;
     searchAbortRef.current?.abort();
@@ -1135,14 +1157,18 @@ export default function Home() {
 
     // 优先走服务端 Web 服务搜索：结果更多、信息更完整，且不会把 Web 服务 Key 暴露到浏览器。
     try {
-      const response = await fetch(`/api/amap/search?keywords=${encodeURIComponent(keyword)}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
+      const params = new URLSearchParams({ keywords: keyword });
+      if (cityHint) params.set("city", cityHint);
+      if (locationHint) params.set("location", locationHint);
+      const response = await fetch(`/api/amap/search?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
       if (requestId !== searchRequestIdRef.current) return;
       if (response.ok) {
         const payload = await response.json() as AMapWebSearchPayload;
         const webResults = (payload.pois ?? []).reduce<SearchResult[]>((results, poi, index) => {
           const location = normalizeSearchLocation(poi.location);
           const address = poi.address || [poi.pname, poi.cityname, poi.adname].filter(Boolean).join(" · ") || "高德地点";
-          if (location) results.push({ id: poi.id ?? `web-poi-${index}`, name: poi.name ?? keyword, address, location, type: poi.type ?? "地点" });
+          const distance = typeof poi.distance === "number" ? poi.distance : typeof poi.distance === "string" ? Number(poi.distance) : undefined;
+          if (location) results.push({ id: poi.id ?? `web-poi-${index}`, name: poi.name ?? keyword, address, location, type: poi.type ?? "地点", distance: typeof distance === "number" && Number.isFinite(distance) ? distance : undefined });
           return results;
         }, []);
         if (webResults.length) {
@@ -1150,11 +1176,7 @@ export default function Home() {
           setSearchResults(webResults);
           return;
         }
-        if (payload.status === "1") {
-          searchCacheRef.current.set(searchKey, { results: [], cachedAt: Date.now() });
-          setMapError("没有找到这个地点，可以换个关键词试试。");
-          return;
-        }
+        // Web 服务没有可用坐标时继续走浏览器 JS API，而不是把空结果缓存下来。
       }
     } catch {
       // Web 服务 Key 未配置或网络异常时，继续使用 JS API 搜索。
@@ -1165,6 +1187,8 @@ export default function Home() {
       setSearchResults([{ id: "demo-1", name: keyword, address: "示例地点 · 配置高德 Key 后可搜索真实 POI", type: "搜索结果" }]);
       return;
     }
+    placeSearchRef.current.setCity?.(cityHint || "全国");
+    placeSearchRef.current.setCityLimit?.(false);
     placeSearchRef.current.search(keyword, (status, result) => {
       if (requestId !== searchRequestIdRef.current) return;
       if (status !== "complete" || !result.poiList?.pois?.length) {
@@ -1571,7 +1595,7 @@ export default function Home() {
 
       {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} />}
       {showShareManager && <ShareManagerModal links={shareLinks} isLoading={isLoadingShareLinks} onClose={() => setShowShareManager(false)} onRefresh={() => void refreshShareLinks()} onCopy={(link) => void copyShareLink(link)} onRevoke={(link) => void revokeShareLink(link)} />}
-      {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{result.address} · {result.type}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在等待搜索结果，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">提示：搜索会在停止输入约 400ms 后自动执行；优先使用高德 Web 服务搜索。</div></div></div>}
+      {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{formatSearchResultMeta(result)}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在结合当前行程位置搜索，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">搜索会结合当天行程位置、城市和全国结果，并优先显示名称最匹配的地点。</div></div></div>}
 
       {showCumulativeTolls && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowCumulativeTolls(false)}><div className="modal-card cumulative-tolls-modal" role="dialog" aria-modal="true" aria-labelledby="cumulative-tolls-title"><div className="modal-head"><div><span className="eyebrow">TOLL CALCULATOR</span><h2 id="cumulative-tolls-title">截至第 {selectedDayIndex + 1} 天</h2></div><button type="button" className="modal-close" onClick={() => setShowCumulativeTolls(false)} aria-label="关闭累计高速费">×</button></div><p className="cumulative-tolls-lead">从 {days[0]?.date ?? "出发日"} 出发，累计计算到 {selectedDay.date} 的所有行程高速费。</p><div className="cumulative-tolls-total"><span>累计高速费</span><strong>{cumulativeTollsComplete ? formatTolls(cumulativeTollsAmount) : readOnly ? "未记录" : amapLoaded ? "正在计算…" : "待获取"}</strong></div><div className="cumulative-tolls-list">{cumulativeTollDays.map(({ day, complete, amount }, index) => <div className="cumulative-toll-row" key={day.id}><div><strong>第 {index + 1} 天 · {day.date}</strong><small>{day.title}</small></div><span>{complete ? formatTolls(amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span></div>)}</div>{!cumulativeTollsComplete && !readOnly && !amapLoaded && <div className="modal-foot">请先连接高德地图，路线规划完成后再次打开这里即可看到累计高速费。</div>}<div className="modal-actions"><button className="primary-button" type="button" onClick={() => setShowCumulativeTolls(false)}>知道了 <span>→</span></button></div></div></div>}
 
