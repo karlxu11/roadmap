@@ -58,13 +58,21 @@ test("stores share snapshots behind a short token", async () => {
   assert.ok(token);
   assert.ok(token.length < 80);
 
+  const updatedSnapshot = { ...snapshot, legs: { "stop-1": { distance: 1200, duration: 90 } } };
+  const updateResponse = await worker.fetch(
+    new Request(`http://localhost/api/shares?token=${token}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(updatedSnapshot) }),
+    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  assert.equal(updateResponse.status, 200);
+
   const readResponse = await worker.fetch(
     new Request(`http://localhost/api/shares?token=${token}`),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv },
     { waitUntil() {}, passThroughOnException() {} },
   );
   assert.equal(readResponse.status, 200);
-  assert.deepEqual((await readResponse.json()).snapshot, snapshot);
+  assert.deepEqual((await readResponse.json()).snapshot, updatedSnapshot);
 });
 
 test("share pages bypass the editor password", async () => {

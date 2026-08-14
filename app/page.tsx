@@ -321,6 +321,14 @@ function hasShareQuery() {
   return typeof window !== "undefined" && new URLSearchParams(window.location.search).has(SHARE_QUERY_KEY);
 }
 
+function expectedShareLegCount(roadbook: Roadbook) {
+  return roadbook.days.reduce((count, day) => count + Math.max(day.stops.length - 1, 0), 0);
+}
+
+function isCompleteShareSnapshot(snapshot: SharedSnapshot) {
+  return Object.keys(snapshot.legs).length >= expectedShareLegCount(snapshot.roadbook);
+}
+
 function projectMapPoint(point: [number, number], points: Array<[number, number]>) {
   const longitudes = points.map(([lng]) => lng);
   const latitudes = points.map(([, lat]) => lat);
@@ -650,18 +658,47 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     if (hasShareQuery()) {
-      void loadShareSnapshot().then((fromShare) => {
+      const encodedShare = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get(SHARE_QUERY_KEY) ?? "";
+      const inlineShare = decodeShareSnapshot(encodedShare);
+      const canPollShare = Boolean(encodedShare && !inlineShare);
+      let applied = false;
+      let pollAttempts = 0;
+      let pollTimer: number | null = null;
+      const applySharedSnapshot = (fromShare: SharedSnapshot | null) => {
         if (cancelled || !fromShare) {
           if (!cancelled) setStorageStatus("unavailable");
           return;
         }
         setSharedSnapshot(fromShare);
         setRoadbooks([fromShare.roadbook]);
-        setActiveRoadbookId(fromShare.roadbook.id);
-        setSelectedDayId(fromShare.roadbook.days[0]?.id ?? "");
+        if (!applied) {
+          setActiveRoadbookId(fromShare.roadbook.id);
+          setSelectedDayId(fromShare.roadbook.days[0]?.id ?? "");
+          applied = true;
+        }
         setStorageStatus("local");
-      });
-      return () => { cancelled = true; };
+        if (isCompleteShareSnapshot(fromShare) && pollTimer !== null) {
+          window.clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      };
+      void loadShareSnapshot().then(applySharedSnapshot);
+      if (canPollShare) {
+        pollTimer = window.setInterval(() => {
+          pollAttempts += 1;
+          void loadShareSnapshot().then((fromShare) => {
+            applySharedSnapshot(fromShare);
+            if (pollAttempts >= 10 && pollTimer !== null) {
+              window.clearInterval(pollTimer);
+              pollTimer = null;
+            }
+          });
+        }, 3000);
+      }
+      return () => {
+        cancelled = true;
+        if (pollTimer !== null) window.clearInterval(pollTimer);
+      };
     }
     const localRoadbooks = loadRoadbooks();
     fetchRemoteRoadbooks().then(async (remoteRoadbooks) => {
@@ -1188,8 +1225,8 @@ export default function Home() {
     try {
       // 分享不再等待整本路书补算完成；先生成当前缓存快照，缺失路段后台继续预热。
       const { snapshot, missingCount } = buildShareSnapshot(activeRoadbook);
-      void prepareShareData(activeRoadbook).catch(() => undefined);
       let shareUrl = "";
+      let shareToken = "";
       try {
         const response = await fetch("/api/shares", {
           method: "POST",
@@ -1199,6 +1236,7 @@ export default function Home() {
         if (response.ok) {
           const payload = await response.json() as { token?: string };
           if (payload.token) {
+            shareToken = payload.token;
             const url = new URL(window.location.href);
             url.search = "";
             url.searchParams.set(SHARE_QUERY_KEY, payload.token);
@@ -1216,6 +1254,18 @@ export default function Home() {
         url.hash = "";
         shareUrl = url.toString();
       }
+      const prepareAndUpdate = async () => {
+        await prepareShareData(activeRoadbook);
+        if (!shareToken) return;
+        const updated = buildShareSnapshot(activeRoadbook).snapshot;
+        await fetch(`/api/shares?token=${encodeURIComponent(shareToken)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(updated),
+          cache: "no-store",
+        });
+      };
+      void prepareAndUpdate().catch(() => undefined);
       try {
         await navigator.clipboard.writeText(shareUrl);
         flash(missingCount ? `分享链接已复制，还有 ${missingCount} 条路线暂未记录` : "分享链接已复制，可直接粘贴发送");

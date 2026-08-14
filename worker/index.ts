@@ -178,6 +178,23 @@ const worker = {
       return Response.json({ ok: true, token }, { headers: { "Cache-Control": "no-store" } });
     }
 
+    if (url.pathname === "/api/shares" && request.method === "PUT") {
+      if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503 });
+      const token = url.searchParams.get("token")?.trim() ?? "";
+      if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) return Response.json({ ok: false, error: "invalid_token" }, { status: 400 });
+      let snapshot: unknown;
+      try {
+        snapshot = await request.json();
+      } catch {
+        return Response.json({ ok: false, error: "invalid_json" }, { status: 400 });
+      }
+      if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "invalid_snapshot" }, { status: 400 });
+      const existing = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`);
+      if (existing === null) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
+      await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
+      return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+    }
+
     if (url.pathname === "/api/shares" && request.method === "GET") {
       if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503 });
       const token = url.searchParams.get("token")?.trim() ?? "";
