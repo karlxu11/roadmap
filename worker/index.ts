@@ -28,6 +28,62 @@ const ACCESS_COOKIE = "roadbook_access";
 const ACCESS_MAX_AGE = 60 * 60 * 24 * 30;
 const ROADBOOK_STORAGE_KEY = "roadbooks:default";
 const SHARE_STORAGE_PREFIX = "roadbook-share:";
+const AMAP_ROUTE_CACHE_TTL = 60 * 60 * 24;
+const AMAP_ROUTE_CACHE_PREFIX = "amap-route-v1:";
+const AMAP_SEARCH_CACHE_TTL = 60 * 10;
+const AMAP_SEARCH_CACHE_PREFIX = "amap-search-v1:";
+
+type NormalizedRoute = {
+  status: "1";
+  info: "OK";
+  route: {
+    distance: number;
+    duration: number;
+    tolls: number | null;
+    path: Array<[number, number]>;
+  };
+};
+type AMapSearchPayload = { status?: string; info?: string; pois?: unknown[]; [key: string]: unknown };
+function normalizeCoordinate(value: string | null) {
+  if (!value) return null;
+  const [lng, lat] = value.split(",").map(Number);
+  return Number.isFinite(lng) && Number.isFinite(lat) && Math.abs(lng) <= 180 && Math.abs(lat) <= 90
+    ? `${lng.toFixed(6)},${lat.toFixed(6)}`
+    : null;
+}
+
+function numberValue(value: unknown) {
+  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(number) ? number : null;
+}
+
+function parsePolyline(value: unknown) {
+  if (typeof value !== "string") return [] as Array<[number, number]>;
+  return value.split(";").flatMap((point) => {
+    const [lng, lat] = point.split(",").map(Number);
+    return Number.isFinite(lng) && Number.isFinite(lat) ? [[lng, lat] as [number, number]] : [];
+  });
+}
+
+function normalizeAmapRoute(payload: unknown): NormalizedRoute | null {
+  if (!payload || typeof payload !== "object") return null;
+  const response = payload as { status?: string; route?: { paths?: Array<{ distance?: unknown; cost?: { duration?: unknown; tolls?: unknown }; steps?: Array<{ polyline?: unknown }> }> } };
+  if (response.status !== "1" || !response.route?.paths?.length) return null;
+  const path = response.route.paths[0];
+  const distance = numberValue(path.distance);
+  const duration = numberValue(path.cost?.duration);
+  if (distance === null || duration === null) return null;
+  return {
+    status: "1",
+    info: "OK",
+    route: {
+      distance,
+      duration,
+      tolls: numberValue(path.cost?.tolls),
+      path: path.steps?.flatMap((step) => parsePolyline(step.polyline)) ?? [],
+    },
+  };
+}
 
 function toBase64Url(bytes: Uint8Array) {
   let binary = "";
@@ -150,11 +206,70 @@ const worker = {
       return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     }
 
+    if (url.pathname === "/api/amap/route" && request.method === "GET") {
+      const webServiceKey = env.AMAP_WEB_SERVICE_KEY?.trim();
+      const origin = normalizeCoordinate(url.searchParams.get("origin"));
+      const destination = normalizeCoordinate(url.searchParams.get("destination"));
+      const policy = url.searchParams.get("policy") ?? "0";
+      const ferry = url.searchParams.get("ferry") ?? "0";
+      const rawWaypoints = url.searchParams.get("waypoints") ?? "";
+      const waypoints = rawWaypoints ? rawWaypoints.split(";").map(normalizeCoordinate) : [];
+      if (!webServiceKey) return Response.json({ status: "0", info: "web service key is not configured" }, { status: 503 });
+      if (!origin || !destination || !/^\d+$/.test(policy) || Number(policy) > 45 || !["0", "1"].includes(ferry) || waypoints.some((point) => !point) || waypoints.length > 16) {
+        return Response.json({ status: "0", info: "invalid route parameters" }, { status: 400 });
+      }
+
+      const validWaypoints = waypoints.filter((point): point is string => Boolean(point));
+      const cacheKey = `${AMAP_ROUTE_CACHE_PREFIX}${origin}|${destination}|policy=${policy}|ferry=${ferry}|waypoints=${validWaypoints.join(";")}`;
+      if (env.ROADBOOK_KV) {
+        const cached = await env.ROADBOOK_KV.get(cacheKey, "json") as NormalizedRoute | null;
+        if (cached?.status === "1" && cached.route) {
+          return Response.json(cached, { headers: { "Cache-Control": `public, max-age=${AMAP_ROUTE_CACHE_TTL}`, "X-Route-Cache": "HIT" } });
+        }
+      }
+
+      const routeUrl = new URL("https://restapi.amap.com/v5/direction/driving");
+      routeUrl.searchParams.set("key", webServiceKey);
+      routeUrl.searchParams.set("origin", origin);
+      routeUrl.searchParams.set("destination", destination);
+      routeUrl.searchParams.set("strategy", policy);
+      routeUrl.searchParams.set("ferry", ferry);
+      routeUrl.searchParams.set("show_fields", "cost,navi");
+      routeUrl.searchParams.set("output", "json");
+      if (validWaypoints.length) routeUrl.searchParams.set("waypoints", validWaypoints.join(";"));
+
+      const upstream = await fetch(routeUrl);
+      let upstreamPayload: unknown;
+      try {
+        upstreamPayload = await upstream.json();
+      } catch {
+        return Response.json({ status: "0", info: "invalid amap response" }, { status: 502 });
+      }
+      const normalized = normalizeAmapRoute(upstreamPayload);
+      if (!upstream.ok || !normalized) {
+        const info = upstreamPayload && typeof upstreamPayload === "object" && typeof (upstreamPayload as { info?: unknown }).info === "string" ? (upstreamPayload as { info: string }).info : "amap route failed";
+        return Response.json({ status: "0", info }, { status: 502, headers: { "Cache-Control": "no-store" } });
+      }
+      const response = Response.json(normalized, {
+        headers: {
+          "Cache-Control": `public, max-age=${AMAP_ROUTE_CACHE_TTL}`,
+          "X-Route-Cache": env.ROADBOOK_KV ? "MISS" : "BYPASS",
+        },
+      });
+      if (env.ROADBOOK_KV) ctx.waitUntil(env.ROADBOOK_KV.put(cacheKey, JSON.stringify(normalized), { expirationTtl: AMAP_ROUTE_CACHE_TTL }));
+      return response;
+    }
+
     if (url.pathname === "/api/amap/search" && request.method === "GET") {
       const keyword = url.searchParams.get("keywords")?.trim() ?? "";
       const webServiceKey = env.AMAP_WEB_SERVICE_KEY?.trim();
       if (!keyword) return Response.json({ status: "0", info: "keywords is required", pois: [] }, { status: 400 });
       if (!webServiceKey) return Response.json({ status: "0", info: "web service key is not configured", pois: [] }, { status: 503 });
+      const searchCacheKey = `${AMAP_SEARCH_CACHE_PREFIX}${keyword.replace(/\s+/g, " ").toLocaleLowerCase()}`;
+      if (env.ROADBOOK_KV) {
+        const cached = await env.ROADBOOK_KV.get(searchCacheKey, "json") as AMapSearchPayload | null;
+        if (cached) return Response.json(cached, { headers: { "Cache-Control": `public, max-age=${AMAP_SEARCH_CACHE_TTL}`, "X-Search-Cache": "HIT" } });
+      }
 
       const searchUrl = new URL("https://restapi.amap.com/v3/place/text");
       searchUrl.searchParams.set("key", webServiceKey);
@@ -165,15 +280,15 @@ const worker = {
       searchUrl.searchParams.set("citylimit", "false");
       const response = await fetch(searchUrl);
       if (!response.ok) return Response.json({ status: "0", info: "amap search failed", pois: [] }, { status: 502 });
-      const payload = await response.json();
-      return Response.json(payload, { headers: { "Cache-Control": "no-store" } });
+      const payload = await response.json() as AMapSearchPayload;
+      if (env.ROADBOOK_KV) ctx.waitUntil(env.ROADBOOK_KV.put(searchCacheKey, JSON.stringify(payload), { expirationTtl: AMAP_SEARCH_CACHE_TTL }));
+      return Response.json(payload, { headers: { "Cache-Control": `public, max-age=${AMAP_SEARCH_CACHE_TTL}`, "X-Search-Cache": env.ROADBOOK_KV ? "MISS" : "BYPASS" } });
     }
 
     if (url.pathname === "/api/amap-config") {
       return Response.json({
         jsKey: env.AMAP_JS_KEY ?? "",
         securityCode: env.AMAP_SECURITY_CODE ?? "",
-        webKey: env.AMAP_WEB_SERVICE_KEY ?? "",
       }, {
         headers: { "Cache-Control": "no-store" },
       });

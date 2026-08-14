@@ -70,10 +70,9 @@ type AMapPolyline = { setMap: (map: AMapMap | null) => void };
 type AMapRoutePoint = { getLng?: () => number; getLat?: () => number; lng?: number; lat?: number };
 type AMapDrivingRoute = { distance?: number; time?: number; tolls?: number; steps?: Array<{ path?: AMapRoutePoint[] }> };
 type AMapDriving = {
-  search: (origin: unknown, destination: unknown, options: Record<string, unknown>, callback: (status: string, result: AMapDrivingResult | string) => void) => void;
+  search: (origin: unknown, destination: unknown, options: Record<string, unknown>, callback: (status: string, result: { routes?: AMapDrivingRoute[] } | string) => void) => void;
   clear: () => void;
 };
-type AMapDrivingResult = { routes?: AMapDrivingRoute[] };
 type AMapPlaceSearch = {
   search: (keyword: string, callback: (status: string, result: { poiList?: { pois?: Array<{ id?: string; name: string; address?: string; location?: SearchLocation; type?: string }> } }) => void) => void;
 };
@@ -91,10 +90,14 @@ const ROADBOOK_LIBRARY_KEY = "roadbook-library-v1";
 const LEGACY_ROADBOOK_KEY = "roadbook-days-v2";
 const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
 const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
+const ROUTE_FAILURE_RETRY_TTL = 5 * 60 * 1000;
+const ROUTE_REQUEST_CONCURRENCY = 4;
+const SEARCH_CACHE_TTL = 10 * 60 * 1000;
 const SHARE_QUERY_KEY = "share";
 
-type CachedLeg = { distance?: number; duration?: number; tolls?: number | null; cachedAt: number };
-type RouteCache = { legs: Record<string, CachedLeg>; paths: Record<string, Array<[number, number]>> };
+type CachedLeg = { distance?: number; duration?: number; tolls?: number | null; path?: Array<[number, number]>; cachedAt: number };
+type RouteCache = { legs: Record<string, CachedLeg>; paths: Record<string, Array<[number, number]>>; errors: Record<string, number> };
+type RouteApiPayload = { status?: string; info?: string; route?: { distance?: number; duration?: number; tolls?: number | null; path?: Array<[number, number]> } };
 
 // 高德偶尔会返回完整的距离/时长，但不返回 tolls。用 null 记录这种结果，
 // 否则每次刷新都会把同一路段误判为未缓存并再次请求。
@@ -107,8 +110,34 @@ function legCacheKey(from: Stop, to: Stop) {
   return `${from.lng.toFixed(6)},${from.lat.toFixed(6)}>${to.lng.toFixed(6)},${to.lat.toFixed(6)}|policy:0`;
 }
 
+function normalizeRoutePath(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((point): point is [number, number] => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+}
+
+function combineRoutePaths(paths: Array<Array<[number, number]> | undefined>) {
+  return paths.reduce<Array<[number, number]>>((combined, path) => {
+    if (!path?.length) return combined;
+    return [...combined, ...(combined.length ? path.slice(1) : path)];
+  }, []);
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
 function loadRouteCache(): RouteCache {
-  if (typeof window === "undefined") return { legs: {}, paths: {} };
+  if (typeof window === "undefined") return { legs: {}, paths: {}, errors: {} };
   try {
     const parsed = JSON.parse(window.localStorage.getItem(ROUTE_CACHE_KEY) ?? "null") as Partial<RouteCache> | null;
     const legs = Object.fromEntries(Object.entries(parsed?.legs ?? {}).flatMap(([key, value]) => {
@@ -118,16 +147,18 @@ function loadRouteCache(): RouteCache {
         || typeof candidate.distance !== "number" || !Number.isFinite(candidate.distance)
         || typeof candidate.duration !== "number" || !Number.isFinite(candidate.duration)) return [];
       const tolls = typeof candidate.tolls === "number" && Number.isFinite(candidate.tolls) ? candidate.tolls : null;
-      return [[key, { distance: candidate.distance, duration: candidate.duration, tolls, cachedAt: candidate.cachedAt } satisfies CachedLeg]];
+      const path = normalizeRoutePath(candidate.path);
+      return [[key, { distance: candidate.distance, duration: candidate.duration, tolls, path: path.length >= 2 ? path : undefined, cachedAt: candidate.cachedAt } satisfies CachedLeg]];
     }));
     const paths = Object.fromEntries(Object.entries(parsed?.paths ?? {}).flatMap(([key, value]) => {
       if (!Array.isArray(value) || value.length < 2) return [];
-      const path = value.filter((point): point is [number, number] => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+      const path = normalizeRoutePath(value);
       return path.length >= 2 ? [[key, path]] : [];
     }));
-    return { legs, paths };
+    const errors = Object.fromEntries(Object.entries(parsed?.errors ?? {}).filter(([, retryAt]) => typeof retryAt === "number" && Number.isFinite(retryAt)));
+    return { legs, paths, errors };
   } catch {
-    return { legs: {}, paths: {} };
+    return { legs: {}, paths: {}, errors: {} };
   }
 }
 
@@ -155,6 +186,14 @@ function displayCachedLeg(leg: CachedLeg) {
     duration: leg.duration,
     tolls: typeof leg.tolls === "number" ? leg.tolls : undefined,
   };
+}
+
+function routePathFromResult(route?: AMapDrivingRoute) {
+  return route?.steps?.flatMap((step) => step.path ?? []).map((point) => {
+    const lng = typeof point.getLng === "function" ? point.getLng() : point.lng;
+    const lat = typeof point.getLat === "function" ? point.getLat() : point.lat;
+    return typeof lng === "number" && typeof lat === "number" ? [lng, lat] as [number, number] : null;
+  }).filter((point): point is [number, number] => point !== null) ?? [];
 }
 
 function encodeShareSnapshot(snapshot: SharedSnapshot) {
@@ -224,14 +263,6 @@ function projectRoutePath(path: Array<[number, number]>, stops: Stop[]) {
     }).join(" "),
     markers: stops.map((stop) => projectMapPoint([stop.lng, stop.lat], points)),
   };
-}
-
-function routePathFromResult(route?: AMapDrivingRoute) {
-  return route?.steps?.flatMap((step) => step.path ?? []).map((point) => {
-    const lng = typeof point.getLng === "function" ? point.getLng() : point.lng;
-    const lat = typeof point.getLat === "function" ? point.getLat() : point.lat;
-    return typeof lng === "number" && typeof lat === "number" ? [lng, lat] as [number, number] : null;
-  }).filter((point): point is [number, number] => point !== null) ?? [];
 }
 
 function defaultRoadbook(): Roadbook {
@@ -442,15 +473,20 @@ export default function Home() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<AMapMap | null>(null);
   const markersRef = useRef<AMapMarker[]>([]);
-  const drivingRef = useRef<AMapDriving | null>(null);
   const routeLineRef = useRef<AMapPolyline | null>(null);
-  const routeCacheRef = useRef<RouteCache>({ legs: {}, paths: {} });
+  const routeCacheRef = useRef<RouteCache>({ legs: {}, paths: {}, errors: {} });
   const pendingLegsRef = useRef(new Map<string, Promise<CachedLeg | null>>());
   const placeSearchRef = useRef<AMapPlaceSearch | null>(null);
+  const searchCacheRef = useRef(new Map<string, { results: SearchResult[]; cachedAt: number }>());
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const searchRequestIdRef = useRef(0);
+  const searchDebounceRef = useRef<number | null>(null);
 
   const selectedDay = days.find((day) => day.id === selectedDayId) ?? days[0];
   const selectedDayIndex = Math.max(days.findIndex((day) => day.id === selectedDayId), 0);
   const totalStops = useMemo(() => days.reduce((sum, day) => sum + day.stops.length, 0), [days]);
+  const selectedDayRouteDependencyKey = useMemo(() => `${selectedDay.id}:${selectedDay.stops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|")}`, [selectedDay]);
+  const routePlanDependencyKey = useMemo(() => days.map((day) => `${day.id}:${day.stops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|")}`).join("||"), [days]);
   const displayLegMetrics = useMemo(() => {
     if (!sharedSnapshot) return legMetrics;
     return Object.fromEntries(Object.entries(sharedSnapshot.legs).map(([stopId, metric]) => [stopId, { status: "ready" as const, ...metric }])) as typeof legMetrics;
@@ -566,6 +602,11 @@ export default function Home() {
     setRouteCacheVersion((version) => version + 1);
   }, []);
 
+  useEffect(() => () => {
+    if (searchDebounceRef.current !== null) window.clearTimeout(searchDebounceRef.current);
+    searchAbortRef.current?.abort();
+  }, []);
+
   useEffect(() => {
     if (hasShareQuery()) return;
     fetch("/api/amap-config")
@@ -575,7 +616,7 @@ export default function Home() {
         setSettings((current) => ({
           jsKey: remote.jsKey ?? current.jsKey,
           securityCode: remote.securityCode ?? current.securityCode,
-          webKey: remote.webKey ?? current.webKey,
+          webKey: current.webKey,
         }));
       })
       .catch(() => undefined);
@@ -617,8 +658,6 @@ export default function Home() {
       markersRef.current.forEach((marker) => marker.setMap(null));
       routeLineRef.current?.setMap(null);
       routeLineRef.current = null;
-      drivingRef.current?.clear();
-      drivingRef.current = null;
       markersRef.current = selectedDay.stops.map((stop, index) => new AMap.Marker({
         map,
         position: [stop.lng, stop.lat],
@@ -627,28 +666,15 @@ export default function Home() {
       }));
       map.setFitView(markersRef.current);
       if (selectedDay.stops.length >= 2) {
-        const cachedPath = routeCacheRef.current.paths[routeKey];
+        const cachedPath = routeCacheRef.current.paths[routeKey] ?? combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path));
         if (cachedPath?.length) {
+          if (!routeCacheRef.current.paths[routeKey]) {
+            routeCacheRef.current.paths[routeKey] = cachedPath;
+            saveRouteCache(routeCacheRef.current);
+          }
           routeLineRef.current = new AMap.Polyline({ path: cachedPath, strokeColor: "#dc6b3f", strokeWeight: 5, strokeOpacity: 0.82, lineJoin: "round" });
           routeLineRef.current.setMap(map);
           map.setFitView([...markersRef.current, routeLineRef.current]);
-        } else {
-          drivingRef.current = new AMap.Driving({ map, policy: 0, hideMarkers: true, autoFitView: true });
-          const origin = new AMap.LngLat(selectedDay.stops[0].lng, selectedDay.stops[0].lat);
-          const destinationStop = selectedDay.stops.at(-1)!;
-          const destination = new AMap.LngLat(destinationStop.lng, destinationStop.lat);
-          const waypoints = selectedDay.stops.slice(1, -1).map((stop) => new AMap.LngLat(stop.lng, stop.lat));
-          drivingRef.current.search(origin, destination, { waypoints, extensions: "all" }, (status, result) => {
-            if (status !== "complete") {
-              setMapError(`高德路线规划失败：${typeof result === "string" ? result : "请检查地点坐标或 Key 权限"}`);
-              return;
-            }
-            const path = routePathFromResult(typeof result === "object" ? result.routes?.[0] : undefined);
-            if (path.length) {
-              routeCacheRef.current.paths[routeKey] = path;
-              saveRouteCache(routeCacheRef.current);
-            }
-          });
         }
       }
       queueMicrotask(() => setMapReady(true));
@@ -660,10 +686,9 @@ export default function Home() {
     }
     return () => {
       markersRef.current.forEach((marker) => marker.setMap(null));
-      drivingRef.current?.clear();
       routeLineRef.current?.setMap(null);
     };
-  }, [amapLoaded, readOnly, selectedDay, storageStatus]);
+  }, [amapLoaded, readOnly, routeCacheVersion, selectedDay, storageStatus]);
 
   useEffect(() => {
     if (readOnly || hasShareQuery() || storageStatus === "loading" || !amapLoaded || !window.AMap) {
@@ -672,52 +697,99 @@ export default function Home() {
     }
     let cancelled = false;
     const now = Date.now();
-    const selectedLegs = selectedDay.stops.slice(0, -1);
-    const initialMetrics = Object.fromEntries(selectedLegs.map((stop, index) => {
-      const cached = routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])];
+    const initialMetrics = Object.fromEntries(selectedDay.stops.slice(0, -1).map((stop, index) => {
+      const key = legCacheKey(stop, selectedDay.stops[index + 1]);
+      const cached = routeCacheRef.current.legs[key];
       const fresh = isFreshCachedLeg(cached, now);
-      return [stop.id, fresh ? { status: "ready" as const, ...displayCachedLeg(cached) } : { status: "loading" as const }];
+      const retryAt = routeCacheRef.current.errors[key];
+      return [stop.id, fresh ? { status: "ready" as const, ...displayCachedLeg(cached) } : retryAt > now ? { status: "error" as const } : { status: "loading" as const }];
     }));
     setLegMetrics(initialMetrics);
 
-    // 补算整本路书尚未缓存的路段，这样最后一天可以显示全程累计费用。
     const allLegs = days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => ({
+      dayId: day.id,
       stop,
       destination: day.stops[index + 1],
       key: legCacheKey(stop, day.stops[index + 1]),
     })));
-    const missingLegs = allLegs.filter(({ key }) => {
+    // 默认只计算当前天；打开累计高速费弹窗后，才补算截至当前天的其它天数。
+    const targetLegs = showCumulativeTolls ? allLegs.filter(({ dayId }) => days.findIndex((day) => day.id === dayId) <= selectedDayIndex) : allLegs.filter(({ dayId }) => dayId === selectedDay.id);
+    const missingLegs = targetLegs.filter(({ key }) => {
       const cached = routeCacheRef.current.legs[key];
-      return !isFreshCachedLeg(cached, now);
+      return !isFreshCachedLeg(cached, now) && (routeCacheRef.current.errors[key] ?? 0) <= now;
     });
     const requestLeg = (stop: Stop, destination: Stop, key: string) => {
       const pending = pendingLegsRef.current.get(key);
       if (pending) return pending;
-      const promise = new Promise<CachedLeg | null>((resolve) => {
-        const driving = new window.AMap!.Driving({ policy: 0 });
-        const timeout = window.setTimeout(() => resolve(null), 12000);
-        driving.search(new window.AMap!.LngLat(stop.lng, stop.lat), new window.AMap!.LngLat(destination.lng, destination.lat), { extensions: "all" }, (status, result) => {
-          window.clearTimeout(timeout);
-          const route = typeof result === "object" ? result.routes?.[0] : undefined;
-          resolve(status === "complete" && route && Number.isFinite(route.distance) && Number.isFinite(route.time)
-            ? { distance: route.distance, duration: route.time, tolls: typeof route.tolls === "number" && Number.isFinite(route.tolls) ? route.tolls : null, cachedAt: Date.now() }
-            : null);
+      const promise = (async () => {
+        const requestWithJsApi = () => new Promise<CachedLeg | null>((resolve) => {
+          if (!window.AMap?.Driving) {
+            resolve(null);
+            return;
+          }
+          const driving = new window.AMap.Driving({ policy: 0 });
+          const timeout = window.setTimeout(() => {
+            driving.clear();
+            resolve(null);
+          }, 12000);
+          try {
+            // fallback 只需要距离、时间和费用，不请求完整分段路径。
+            driving.search(new window.AMap.LngLat(stop.lng, stop.lat), new window.AMap.LngLat(destination.lng, destination.lat), { extensions: "base" }, (status, result) => {
+              window.clearTimeout(timeout);
+              const route = typeof result === "object" ? result.routes?.[0] : undefined;
+              const path = routePathFromResult(route);
+              resolve(status === "complete" && route && Number.isFinite(route.distance) && Number.isFinite(route.time)
+                ? { distance: route.distance, duration: route.time, tolls: typeof route.tolls === "number" && Number.isFinite(route.tolls) ? route.tolls : null, path: path.length >= 2 ? path : undefined, cachedAt: Date.now() }
+                : null);
+            });
+          } catch {
+            window.clearTimeout(timeout);
+            resolve(null);
+          }
         });
-      });
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 12000);
+        try {
+          const params = new URLSearchParams({
+            origin: `${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`,
+            destination: `${destination.lng.toFixed(6)},${destination.lat.toFixed(6)}`,
+            policy: "0",
+          });
+          const response = await fetch(`/api/amap/route?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
+          if (!response.ok) return response.status === 404 || response.status === 503 ? requestWithJsApi() : null;
+          const payload = await response.json() as RouteApiPayload;
+          return payload.status === "1" && payload.route && typeof payload.route.distance === "number" && typeof payload.route.duration === "number"
+            ? { distance: payload.route.distance, duration: payload.route.duration, tolls: typeof payload.route.tolls === "number" ? payload.route.tolls : null, path: payload.route.path, cachedAt: Date.now() }
+            : null;
+        } catch {
+          return null;
+        } finally {
+          window.clearTimeout(timeout);
+        }
+      })();
       pendingLegsRef.current.set(key, promise);
       void promise.finally(() => pendingLegsRef.current.delete(key));
       return promise;
     };
-    Promise.all(missingLegs.map(async ({ stop, destination, key }) => ({ stopId: stop.id, key, metric: await requestLeg(stop, destination, key) }))).then((entries) => {
-      entries.forEach(({ key, metric }) => { if (metric) routeCacheRef.current.legs[key] = metric; });
-      if (entries.some(({ metric }) => metric)) {
+    void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({ stopId: stop.id, key, metric: await requestLeg(stop, destination, key) })).then((entries) => {
+      entries.forEach(({ key, metric }) => {
+        if (metric) {
+          routeCacheRef.current.legs[key] = metric;
+          delete routeCacheRef.current.errors[key];
+        } else {
+          routeCacheRef.current.errors[key] = Date.now() + ROUTE_FAILURE_RETRY_TTL;
+        }
+      });
+      if (entries.length) {
         saveRouteCache(routeCacheRef.current);
         setRouteCacheVersion((version) => version + 1);
       }
       if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.map(({ stopId, metric }) => [stopId, metric ? { status: "ready" as const, ...displayCachedLeg(metric) } : { status: "error" as const }])) }));
     });
     return () => { cancelled = true; };
-  }, [amapLoaded, days, readOnly, selectedDay, storageStatus]);
+  // 路线计算只依赖路线指纹；标题、备注和出发时间变化不应重新触发高德请求。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amapLoaded, readOnly, routePlanDependencyKey, selectedDayIndex, selectedDayRouteDependencyKey, showCumulativeTolls, storageStatus]);
 
   function updateEditorWidth(clientX: number) {
     const workspace = workspaceRef.current;
@@ -851,16 +923,28 @@ export default function Home() {
     flash("已移除地点");
   }
 
-  async function searchPlaces() {
+  async function searchPlaces(rawKeyword = query) {
     if (readOnly) return;
-    const keyword = query.trim();
+    const keyword = rawKeyword.trim();
     if (!keyword) return;
+    const searchKey = keyword.replace(/\s+/g, " ").toLocaleLowerCase();
+    const requestId = searchRequestIdRef.current + 1;
+    searchRequestIdRef.current = requestId;
+    searchAbortRef.current?.abort();
+    const cachedSearch = searchCacheRef.current.get(searchKey);
+    if (cachedSearch && Date.now() - cachedSearch.cachedAt < SEARCH_CACHE_TTL) {
+      setSearchResults(cachedSearch.results);
+      return;
+    }
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
     setSearchResults([]);
     setMapError("");
 
     // 优先走服务端 Web 服务搜索：结果更多、信息更完整，且不会把 Web 服务 Key 暴露到浏览器。
     try {
-      const response = await fetch(`/api/amap/search?keywords=${encodeURIComponent(keyword)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      const response = await fetch(`/api/amap/search?keywords=${encodeURIComponent(keyword)}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
+      if (requestId !== searchRequestIdRef.current) return;
       if (response.ok) {
         const payload = await response.json() as AMapWebSearchPayload;
         const webResults = (payload.pois ?? []).reduce<SearchResult[]>((results, poi, index) => {
@@ -870,10 +954,12 @@ export default function Home() {
           return results;
         }, []);
         if (webResults.length) {
+          searchCacheRef.current.set(searchKey, { results: webResults, cachedAt: Date.now() });
           setSearchResults(webResults);
           return;
         }
         if (payload.status === "1") {
+          searchCacheRef.current.set(searchKey, { results: [], cachedAt: Date.now() });
           setMapError("没有找到这个地点，可以换个关键词试试。");
           return;
         }
@@ -882,24 +968,50 @@ export default function Home() {
       // Web 服务 Key 未配置或网络异常时，继续使用 JS API 搜索。
     }
 
+    if (requestId !== searchRequestIdRef.current) return;
     if (!placeSearchRef.current) {
       setSearchResults([{ id: "demo-1", name: keyword, address: "示例地点 · 配置高德 Key 后可搜索真实 POI", type: "搜索结果" }]);
       return;
     }
     placeSearchRef.current.search(keyword, (status, result) => {
+      if (requestId !== searchRequestIdRef.current) return;
       if (status !== "complete" || !result.poiList?.pois?.length) {
         setSearchResults([]);
         setMapError("没有找到这个地点，可以换个关键词试试。");
         return;
       }
-      setSearchResults(result.poiList.pois.map((poi, index) => ({
+      const results = result.poiList.pois.map((poi, index) => ({
         id: poi.id ?? `poi-${index}`,
         name: poi.name,
         address: poi.address ?? "高德地点",
         location: normalizeSearchLocation(poi.location),
         type: poi.type ?? "地点",
-      })));
+      }));
+      searchCacheRef.current.set(searchKey, { results, cachedAt: Date.now() });
+      setSearchResults(results);
     });
+  }
+
+  function schedulePlaceSearch(value: string) {
+    if (searchDebounceRef.current !== null) window.clearTimeout(searchDebounceRef.current);
+    if (!value.trim()) {
+      searchRequestIdRef.current += 1;
+      searchAbortRef.current?.abort();
+      setSearchResults([]);
+      return;
+    }
+    searchDebounceRef.current = window.setTimeout(() => {
+      searchDebounceRef.current = null;
+      void searchPlaces(value);
+    }, 400);
+  }
+
+  function searchPlacesImmediately(value = query) {
+    if (searchDebounceRef.current !== null) {
+      window.clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+    void searchPlaces(value);
   }
 
   function addSearchResult(result: SearchResult) {
@@ -1183,7 +1295,7 @@ export default function Home() {
       </div>
 
       {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} />}
-      {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && searchPlaces()} /><button type="button" onClick={searchPlaces}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{result.address} · {result.type}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "按回车或点击搜索，看看高德有什么" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">提示：优先使用高德 Web 服务搜索，配置 Web 服务 Key 后可返回更多真实 POI。</div></div></div>}
+      {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{result.address} · {result.type}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在等待搜索结果，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">提示：搜索会在停止输入约 400ms 后自动执行；优先使用高德 Web 服务搜索。</div></div></div>}
 
       {showCumulativeTolls && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowCumulativeTolls(false)}><div className="modal-card cumulative-tolls-modal" role="dialog" aria-modal="true" aria-labelledby="cumulative-tolls-title"><div className="modal-head"><div><span className="eyebrow">TOLL CALCULATOR</span><h2 id="cumulative-tolls-title">截至第 {selectedDayIndex + 1} 天</h2></div><button type="button" className="modal-close" onClick={() => setShowCumulativeTolls(false)} aria-label="关闭累计高速费">×</button></div><p className="cumulative-tolls-lead">从 {days[0]?.date ?? "出发日"} 出发，累计计算到 {selectedDay.date} 的所有行程高速费。</p><div className="cumulative-tolls-total"><span>累计高速费</span><strong>{cumulativeTollsComplete ? formatTolls(cumulativeTollsAmount) : readOnly ? "未记录" : amapLoaded ? "正在计算…" : "待获取"}</strong></div><div className="cumulative-tolls-list">{cumulativeTollDays.map(({ day, complete, amount }, index) => <div className="cumulative-toll-row" key={day.id}><div><strong>第 {index + 1} 天 · {day.date}</strong><small>{day.title}</small></div><span>{complete ? formatTolls(amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span></div>)}</div>{!cumulativeTollsComplete && !readOnly && !amapLoaded && <div className="modal-foot">请先连接高德地图，路线规划完成后再次打开这里即可看到累计高速费。</div>}<div className="modal-actions"><button className="primary-button" type="button" onClick={() => setShowCumulativeTolls(false)}>知道了 <span>→</span></button></div></div></div>}
 
