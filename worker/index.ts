@@ -234,7 +234,7 @@ const worker = {
       routeUrl.searchParams.set("destination", destination);
       routeUrl.searchParams.set("strategy", policy);
       routeUrl.searchParams.set("ferry", ferry);
-      routeUrl.searchParams.set("show_fields", "cost,navi");
+      routeUrl.searchParams.set("show_fields", "cost,navi,polyline");
       routeUrl.searchParams.set("output", "json");
       if (validWaypoints.length) routeUrl.searchParams.set("waypoints", validWaypoints.join(";"));
 
@@ -247,8 +247,10 @@ const worker = {
       }
       const normalized = normalizeAmapRoute(upstreamPayload);
       if (!upstream.ok || !normalized) {
-        const info = upstreamPayload && typeof upstreamPayload === "object" && typeof (upstreamPayload as { info?: unknown }).info === "string" ? (upstreamPayload as { info: string }).info : "amap route failed";
-        return Response.json({ status: "0", info }, { status: 502, headers: { "Cache-Control": "no-store" } });
+        const payload = upstreamPayload && typeof upstreamPayload === "object" ? upstreamPayload as { info?: unknown; infocode?: unknown } : {};
+        const info = typeof payload.info === "string" ? payload.info : "amap route failed";
+        const infocode = typeof payload.infocode === "string" ? payload.infocode : undefined;
+        return Response.json({ status: "0", info, ...(infocode ? { infocode } : {}) }, { status: 502, headers: { "Cache-Control": "no-store" } });
       }
       const response = Response.json(normalized, {
         headers: {

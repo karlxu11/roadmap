@@ -196,6 +196,71 @@ function routePathFromResult(route?: AMapDrivingRoute) {
   }).filter((point): point is [number, number] => point !== null) ?? [];
 }
 
+function sampleRoutePath(path: Array<[number, number]>, maxPoints = 500) {
+  if (path.length <= maxPoints) return path;
+  const step = Math.max(1, Math.ceil((path.length - 1) / (maxPoints - 1)));
+  return path.filter((_, index) => index % step === 0 || index === path.length - 1);
+}
+
+async function fetchRouteLeg(stop: Stop, destination: Stop, includePath: boolean) {
+  const requestWithJsApi = () => new Promise<CachedLeg | null>((resolve) => {
+    if (!window.AMap?.Driving) {
+      resolve(null);
+      return;
+    }
+    const driving = new window.AMap.Driving({ policy: 0 });
+    const timeout = window.setTimeout(() => {
+      driving.clear();
+      resolve(null);
+    }, 12000);
+    try {
+      // 普通路线只取基础字段；分享准备阶段才请求完整路径。
+      driving.search(new window.AMap.LngLat(stop.lng, stop.lat), new window.AMap.LngLat(destination.lng, destination.lat), { extensions: includePath ? "all" : "base" }, (status, result) => {
+        window.clearTimeout(timeout);
+        const route = typeof result === "object" ? result.routes?.[0] : undefined;
+        const path = includePath ? routePathFromResult(route) : [];
+        resolve(status === "complete" && route && Number.isFinite(route.distance) && Number.isFinite(route.time)
+          ? { distance: route.distance, duration: route.time, tolls: typeof route.tolls === "number" && Number.isFinite(route.tolls) ? route.tolls : null, path: path.length >= 2 ? path : undefined, cachedAt: Date.now() }
+          : null);
+      });
+    } catch {
+      window.clearTimeout(timeout);
+      resolve(null);
+    }
+  });
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12000);
+  try {
+    const params = new URLSearchParams({
+      origin: `${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`,
+      destination: `${destination.lng.toFixed(6)},${destination.lat.toFixed(6)}`,
+      policy: "0",
+    });
+    const response = await fetch(`/api/amap/route?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
+    // Worker 上游高德返回 5xx/限流时，回退到已经加载的 JS API，避免整段路线被判失败。
+    if (!response.ok) return response.status === 404 || response.status === 429 || response.status >= 500 ? requestWithJsApi() : null;
+    const payload = await response.json() as RouteApiPayload;
+    return payload.status === "1" && payload.route && typeof payload.route.distance === "number" && typeof payload.route.duration === "number"
+      ? { distance: payload.route.distance, duration: payload.route.duration, tolls: typeof payload.route.tolls === "number" ? payload.route.tolls : null, path: payload.route.path, cachedAt: Date.now() }
+      : null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function requestRouteLeg(stop: Stop, destination: Stop, key: string, pendingLegs: Map<string, Promise<CachedLeg | null>>, includePath = false) {
+  const pendingKey = `${key}|path:${includePath ? "1" : "0"}`;
+  const pending = pendingLegs.get(pendingKey);
+  if (pending) return pending;
+  const promise = fetchRouteLeg(stop, destination, includePath);
+  pendingLegs.set(pendingKey, promise);
+  void promise.finally(() => pendingLegs.delete(pendingKey));
+  return promise;
+}
+
 function encodeShareSnapshot(snapshot: SharedSnapshot) {
   const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
   let binary = "";
@@ -460,6 +525,7 @@ export default function Home() {
   const [editingNoteStopId, setEditingNoteStopId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [showToast, setShowToast] = useState("");
+  const [isPreparingShare, setIsPreparingShare] = useState(false);
   const [storageStatus, setStorageStatus] = useState<"loading" | "remote" | "saving" | "local" | "unavailable">("loading");
   const [amapLoaded, setAmapLoaded] = useState(false);
   const [mapReady, setMapReady] = useState(false);
@@ -718,60 +784,7 @@ export default function Home() {
       const cached = routeCacheRef.current.legs[key];
       return !isFreshCachedLeg(cached, now) && (routeCacheRef.current.errors[key] ?? 0) <= now;
     });
-    const requestLeg = (stop: Stop, destination: Stop, key: string) => {
-      const pending = pendingLegsRef.current.get(key);
-      if (pending) return pending;
-      const promise = (async () => {
-        const requestWithJsApi = () => new Promise<CachedLeg | null>((resolve) => {
-          if (!window.AMap?.Driving) {
-            resolve(null);
-            return;
-          }
-          const driving = new window.AMap.Driving({ policy: 0 });
-          const timeout = window.setTimeout(() => {
-            driving.clear();
-            resolve(null);
-          }, 12000);
-          try {
-            // fallback 只需要距离、时间和费用，不请求完整分段路径。
-            driving.search(new window.AMap.LngLat(stop.lng, stop.lat), new window.AMap.LngLat(destination.lng, destination.lat), { extensions: "base" }, (status, result) => {
-              window.clearTimeout(timeout);
-              const route = typeof result === "object" ? result.routes?.[0] : undefined;
-              const path = routePathFromResult(route);
-              resolve(status === "complete" && route && Number.isFinite(route.distance) && Number.isFinite(route.time)
-                ? { distance: route.distance, duration: route.time, tolls: typeof route.tolls === "number" && Number.isFinite(route.tolls) ? route.tolls : null, path: path.length >= 2 ? path : undefined, cachedAt: Date.now() }
-                : null);
-            });
-          } catch {
-            window.clearTimeout(timeout);
-            resolve(null);
-          }
-        });
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 12000);
-        try {
-          const params = new URLSearchParams({
-            origin: `${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`,
-            destination: `${destination.lng.toFixed(6)},${destination.lat.toFixed(6)}`,
-            policy: "0",
-          });
-          const response = await fetch(`/api/amap/route?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
-          if (!response.ok) return response.status === 404 || response.status === 503 ? requestWithJsApi() : null;
-          const payload = await response.json() as RouteApiPayload;
-          return payload.status === "1" && payload.route && typeof payload.route.distance === "number" && typeof payload.route.duration === "number"
-            ? { distance: payload.route.distance, duration: payload.route.duration, tolls: typeof payload.route.tolls === "number" ? payload.route.tolls : null, path: payload.route.path, cachedAt: Date.now() }
-            : null;
-        } catch {
-          return null;
-        } finally {
-          window.clearTimeout(timeout);
-        }
-      })();
-      pendingLegsRef.current.set(key, promise);
-      void promise.finally(() => pendingLegsRef.current.delete(key));
-      return promise;
-    };
-    void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({ stopId: stop.id, key, metric: await requestLeg(stop, destination, key) })).then((entries) => {
+    void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({ stopId: stop.id, key, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current) })).then((entries) => {
       entries.forEach(({ key, metric }) => {
         if (metric) {
           routeCacheRef.current.legs[key] = metric;
@@ -1075,6 +1088,55 @@ export default function Home() {
     window.print();
   }
 
+  function buildSharePaths(roadbook: Roadbook) {
+    return Object.fromEntries(roadbook.days.flatMap((day) => {
+      if (day.stops.length < 2) return [];
+      const key = routeCacheKey(day.stops);
+      const path = routeCacheRef.current.paths[key] ?? combineRoutePaths(day.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])]?.path));
+      return path.length >= 2 ? [[key, sampleRoutePath(path)]] : [];
+    }));
+  }
+
+  async function prepareShareData(roadbook: Roadbook) {
+    const allLegs = roadbook.days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => ({
+      day,
+      stop,
+      destination: day.stops[index + 1],
+      key: legCacheKey(stop, day.stops[index + 1]),
+    })));
+    const now = Date.now();
+    const missingLegs = allLegs.filter(({ day, stop, destination, key }) => {
+      const cached = routeCacheRef.current.legs[key];
+      const hasFullDayPath = routeCacheRef.current.paths[routeCacheKey(day.stops)]?.length >= 2;
+      const hasLegPath = cached?.path && cached.path.length >= 2;
+      return !isFreshCachedLeg(cached, now) || (!hasFullDayPath && !hasLegPath && Boolean(stop) && Boolean(destination));
+    });
+    const entries = await mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({
+      key,
+      metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, true),
+    }));
+    entries.forEach(({ key, metric }) => {
+      if (metric) {
+        routeCacheRef.current.legs[key] = metric;
+        delete routeCacheRef.current.errors[key];
+      } else {
+        routeCacheRef.current.errors[key] = Date.now() + ROUTE_FAILURE_RETRY_TTL;
+      }
+    });
+    if (entries.length) {
+      saveRouteCache(routeCacheRef.current);
+      setRouteCacheVersion((version) => version + 1);
+    }
+    const paths = buildSharePaths(roadbook);
+    const incompleteLegs = allLegs.filter(({ key }) => !isFreshCachedLeg(routeCacheRef.current.legs[key]));
+    const incompletePaths = roadbook.days.filter((day) => day.stops.length >= 2).filter((day) => !paths[routeCacheKey(day.stops)]);
+    return {
+      complete: incompleteLegs.length === 0 && incompletePaths.length === 0,
+      missingCount: incompleteLegs.length + incompletePaths.length,
+      paths,
+    };
+  }
+
   async function shareRoadbook() {
     if (readOnly) {
       try {
@@ -1085,51 +1147,60 @@ export default function Home() {
       }
       return;
     }
-    const legs = Object.fromEntries(activeRoadbook.days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => {
-      const cached = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
-      const current = legMetrics[stop.id];
-      const metric = current?.status === "ready" ? current : cached;
-      return [stop.id, metric ? { distance: metric.distance, duration: metric.duration, tolls: typeof metric.tolls === "number" ? metric.tolls : undefined } : {}];
-    })));
-    const snapshot: SharedSnapshot = {
-      version: 1,
-      roadbook: activeRoadbook,
-      legs,
-      paths: routeCacheRef.current.paths,
-      createdAt: new Date().toISOString(),
-    };
-    let shareUrl = "";
+    if (isPreparingShare) return;
+    setIsPreparingShare(true);
     try {
-      const response = await fetch("/api/shares", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify(snapshot),
-      });
-      if (response.ok) {
-        const payload = await response.json() as { token?: string };
-        if (payload.token) {
-          const url = new URL(window.location.href);
-          url.search = "";
-          url.searchParams.set(SHARE_QUERY_KEY, payload.token);
-          url.hash = "";
-          shareUrl = url.toString();
-        }
+      const prepared = await prepareShareData(activeRoadbook);
+      if (!prepared.complete) {
+        flash(`还有 ${prepared.missingCount} 个路线数据未准备好，暂时无法生成完整分享链接`);
+        return;
       }
-    } catch {
-      // Local development without KV falls back to the legacy inline snapshot link.
-    }
-    if (!shareUrl) {
-      const url = new URL(window.location.href);
-      url.search = "";
-      url.searchParams.set(SHARE_QUERY_KEY, encodeShareSnapshot(snapshot));
-      url.hash = "";
-      shareUrl = url.toString();
-    }
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      flash("分享链接已复制，可直接粘贴发送");
-    } catch {
-      flash("复制失败，请检查浏览器剪贴板权限");
+      const legs = Object.fromEntries(activeRoadbook.days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => {
+        const metric = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
+        return [stop.id, { distance: metric.distance, duration: metric.duration, tolls: typeof metric.tolls === "number" ? metric.tolls : undefined }];
+      })));
+      const snapshot: SharedSnapshot = {
+        version: 1,
+        roadbook: activeRoadbook,
+        legs,
+        paths: prepared.paths,
+        createdAt: new Date().toISOString(),
+      };
+      let shareUrl = "";
+      try {
+        const response = await fetch("/api/shares", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(snapshot),
+        });
+        if (response.ok) {
+          const payload = await response.json() as { token?: string };
+          if (payload.token) {
+            const url = new URL(window.location.href);
+            url.search = "";
+            url.searchParams.set(SHARE_QUERY_KEY, payload.token);
+            url.hash = "";
+            shareUrl = url.toString();
+          }
+        }
+      } catch {
+        // Local development without KV falls back to the legacy inline snapshot link.
+      }
+      if (!shareUrl) {
+        const url = new URL(window.location.href);
+        url.search = "";
+        url.searchParams.set(SHARE_QUERY_KEY, encodeShareSnapshot(snapshot));
+        url.hash = "";
+        shareUrl = url.toString();
+      }
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        flash("分享链接已复制，可直接粘贴发送");
+      } catch {
+        flash("复制失败，请检查浏览器剪贴板权限");
+      }
+    } finally {
+      setIsPreparingShare(false);
     }
   }
 
@@ -1204,7 +1275,7 @@ export default function Home() {
               <div className="title-row"><input readOnly={readOnly} aria-label="编辑当天标题" value={selectedDay.title} onChange={(event) => updateSelectedDay((day) => ({ ...day, title: event.target.value }))} /><span className="edit-hint">{readOnly ? "只读" : "↗"}</span></div>
               <input className="subtitle-input" readOnly={readOnly} aria-label="编辑当天副标题" value={selectedDay.subtitle} onChange={(event) => updateSelectedDay((day) => ({ ...day, subtitle: event.target.value }))} />
             </div>
-            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 分享路书</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
+            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
           <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div><span className="stat-label">当日路段</span><strong>{Math.max(selectedDay.stops.length - 1, 0)} 段</strong></div><div className="route-state"><span className={mapReady ? "live-dot" : ""} /> {readOnly ? "分享快照 · 未调用高德" : mapReady ? "高德路线已接入" : "示例路线预览"}</div></div>
