@@ -92,6 +92,7 @@ const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
 const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
 const ROUTE_FAILURE_RETRY_TTL = 5 * 60 * 1000;
 const ROUTE_REQUEST_CONCURRENCY = 4;
+const ROUTE_CACHE_PATH_MAX_POINTS = 240;
 const SEARCH_CACHE_TTL = 10 * 60 * 1000;
 const SHARE_QUERY_KEY = "share";
 
@@ -163,10 +164,30 @@ function loadRouteCache(): RouteCache {
 }
 
 function saveRouteCache(cache: RouteCache) {
+  const compactLegs = Object.fromEntries(Object.entries(cache.legs).map(([key, leg]) => [key, {
+    distance: leg.distance,
+    duration: leg.duration,
+    tolls: leg.tolls,
+    path: leg.path?.length ? sampleRoutePath(leg.path, ROUTE_CACHE_PATH_MAX_POINTS) : undefined,
+    cachedAt: leg.cachedAt,
+  }]));
+  const compactPaths = Object.fromEntries(Object.entries(cache.paths).map(([key, path]) => [key, sampleRoutePath(path, ROUTE_CACHE_PATH_MAX_POINTS)]));
+  const compactCache: RouteCache = { legs: compactLegs, paths: compactPaths, errors: cache.errors };
   try {
-    window.localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(cache));
+    window.localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(compactCache));
   } catch {
-    // Route data is only a disposable optimization cache.
+    // 轨迹点可能让 localStorage 超限；清掉旧的大对象后只保留指标，避免刷新后全部重算。
+    try {
+      window.localStorage.removeItem(ROUTE_CACHE_KEY);
+      const metricsOnly = {
+        legs: Object.fromEntries(Object.entries(compactLegs).map(([key, leg]) => [key, { distance: leg.distance, duration: leg.duration, tolls: leg.tolls, cachedAt: leg.cachedAt }])),
+        paths: {},
+        errors: cache.errors,
+      } satisfies RouteCache;
+      window.localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(metricsOnly));
+    } catch {
+      // Route data is only a disposable optimization cache.
+    }
   }
 }
 
@@ -237,7 +258,7 @@ async function fetchRouteLeg(stop: Stop, destination: Stop, includePath: boolean
       destination: `${destination.lng.toFixed(6)},${destination.lat.toFixed(6)}`,
       policy: "0",
     });
-    const response = await fetch(`/api/amap/route?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
+    const response = await fetch(`/api/amap/route?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "force-cache" });
     // Worker 上游高德返回 5xx/限流时，回退到已经加载的 JS API，避免整段路线被判失败。
     if (!response.ok) return response.status === 404 || response.status === 429 || response.status >= 500 ? requestWithJsApi() : null;
     const payload = await response.json() as RouteApiPayload;
