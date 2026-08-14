@@ -151,15 +151,21 @@ function shareRouteKey(stops: ShareStop[]) {
 async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnapshot) {
   if (!env.ROADBOOK_KV) return;
   const snapshot = JSON.parse(JSON.stringify(initial)) as ShareSnapshot;
-  const missing = snapshot.roadbook.days.flatMap((day) => (day.stops ?? []).slice(0, -1).flatMap((from, index) => {
+  const daysNeedingPath = snapshot.roadbook.days.filter((day) => {
+    const stops = day.stops ?? [];
+    return stops.length >= 2 && !snapshot.paths?.[shareRouteKey(stops)];
+  });
+  const tasks = snapshot.roadbook.days.flatMap((day) => (day.stops ?? []).slice(0, -1).flatMap((from, index) => {
     const to = day.stops?.[index + 1];
     if (!from.id || !to || typeof from.lng !== "number" || typeof from.lat !== "number" || typeof to.lng !== "number" || typeof to.lat !== "number") return [];
     const existing = snapshot.legs[from.id];
-    return typeof existing?.distance === "number" && typeof existing?.duration === "number" ? [] : [{ from, to }];
+    const needsMetric = typeof existing?.distance !== "number" || typeof existing?.duration !== "number";
+    const needsPath = daysNeedingPath.includes(day);
+    return needsMetric || needsPath ? [{ from, to }] : [];
   }));
-  if (!missing.length) return;
+  if (!tasks.length) return;
 
-  const results = await mapShareWithConcurrency(missing, 4, async ({ from, to }) => ({ id: from.id!, route: await fetchShareRoute(env, from, to) }));
+  const results = await mapShareWithConcurrency(tasks, 4, async ({ from, to }) => ({ id: from.id!, route: await fetchShareRoute(env, from, to) }));
   const routeByStopId = new Map<string, NormalizedRoute>();
   results.forEach(({ id, route }) => {
     if (!route) return;

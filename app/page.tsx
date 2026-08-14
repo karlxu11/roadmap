@@ -325,8 +325,13 @@ function expectedShareLegCount(roadbook: Roadbook) {
   return roadbook.days.reduce((count, day) => count + Math.max(day.stops.length - 1, 0), 0);
 }
 
+function expectedSharePathCount(roadbook: Roadbook) {
+  return roadbook.days.filter((day) => day.stops.length >= 2).length;
+}
+
 function isCompleteShareSnapshot(snapshot: SharedSnapshot) {
-  return Object.keys(snapshot.legs).length >= expectedShareLegCount(snapshot.roadbook);
+  return Object.keys(snapshot.legs).length >= expectedShareLegCount(snapshot.roadbook)
+    && Object.keys(snapshot.paths ?? {}).length >= expectedSharePathCount(snapshot.roadbook);
 }
 
 function projectMapPoint(point: [number, number], points: Array<[number, number]>) {
@@ -688,7 +693,7 @@ export default function Home() {
           pollAttempts += 1;
           void loadShareSnapshot().then((fromShare) => {
             applySharedSnapshot(fromShare);
-            if (pollAttempts >= 10 && pollTimer !== null) {
+            if (pollAttempts >= 40 && pollTimer !== null) {
               window.clearInterval(pollTimer);
               pollTimer = null;
             }
