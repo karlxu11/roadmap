@@ -2,6 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { inputTipsToPois, rankAmapPois } from "./amap-search";
+import { extractHighwayPath, rankRouteServiceAreas, sampleRouteSearchPoints } from "./service-areas";
 
 interface Env {
   ASSETS: Fetcher;
@@ -35,6 +36,8 @@ const AMAP_ROUTE_CACHE_TTL = 60 * 60 * 24;
 const AMAP_ROUTE_CACHE_PREFIX = "amap-route-v1:";
 const AMAP_SEARCH_CACHE_TTL = 60 * 10;
 const AMAP_SEARCH_CACHE_PREFIX = "amap-search-v2:";
+const AMAP_SERVICE_AREA_CACHE_TTL = 60 * 60 * 6;
+const AMAP_SERVICE_AREA_CACHE_PREFIX = "amap-service-areas-v1:";
 
 type NormalizedRoute = {
   status: "1";
@@ -524,6 +527,65 @@ const worker = {
       const payload = { status: "1", info: "OK", pois: rankAmapPois(batches, keyword) } satisfies AMapSearchPayload;
       if (env.ROADBOOK_KV) ctx.waitUntil(env.ROADBOOK_KV.put(searchCacheKey, JSON.stringify(payload), { expirationTtl: AMAP_SEARCH_CACHE_TTL }));
       return Response.json(payload, { headers: { "Cache-Control": `public, max-age=${AMAP_SEARCH_CACHE_TTL}`, "X-Search-Cache": env.ROADBOOK_KV ? "MISS" : "BYPASS" } });
+    }
+
+    if (url.pathname === "/api/amap/service-areas" && request.method === "GET") {
+      const webServiceKey = env.AMAP_WEB_SERVICE_KEY?.trim();
+      const origin = normalizeCoordinate(url.searchParams.get("origin"));
+      const destination = normalizeCoordinate(url.searchParams.get("destination"));
+      if (!webServiceKey) return Response.json({ status: "0", info: "web service key is not configured", highway: false, serviceAreas: [] }, { status: 503 });
+      if (!origin || !destination) return Response.json({ status: "0", info: "invalid route parameters", highway: false, serviceAreas: [] }, { status: 400 });
+
+      const cacheKey = `${AMAP_SERVICE_AREA_CACHE_PREFIX}${origin}|${destination}|policy=0`;
+      if (env.ROADBOOK_KV) {
+        const cached = await env.ROADBOOK_KV.get(cacheKey, "json") as { status?: string; highway?: boolean; serviceAreas?: unknown[] } | null;
+        if (cached?.status === "1") return Response.json(cached, { headers: { "Cache-Control": `public, max-age=${AMAP_SERVICE_AREA_CACHE_TTL}`, "X-Service-Area-Cache": "HIT" } });
+      }
+
+      const routeUrl = new URL("https://restapi.amap.com/v5/direction/driving");
+      routeUrl.searchParams.set("key", webServiceKey);
+      routeUrl.searchParams.set("origin", origin);
+      routeUrl.searchParams.set("destination", destination);
+      routeUrl.searchParams.set("strategy", "0");
+      routeUrl.searchParams.set("ferry", "0");
+      routeUrl.searchParams.set("show_fields", "cost,navi,polyline");
+      routeUrl.searchParams.set("output", "json");
+      const routeResponse = await fetch(routeUrl);
+      if (!routeResponse.ok) return Response.json({ status: "0", info: "amap route failed", highway: false, serviceAreas: [] }, { status: 502 });
+      const routePayload = await routeResponse.json() as { status?: string; info?: string };
+      if (routePayload.status !== "1") return Response.json({ status: "0", info: routePayload.info || "amap route failed", highway: false, serviceAreas: [] }, { status: 502 });
+      const highwayPath = extractHighwayPath(routePayload);
+      if (highwayPath.length < 2) {
+        const payload = { status: "1", info: "OK", highway: false, serviceAreas: [] };
+        if (env.ROADBOOK_KV) ctx.waitUntil(env.ROADBOOK_KV.put(cacheKey, JSON.stringify(payload), { expirationTtl: AMAP_SERVICE_AREA_CACHE_TTL }));
+        return Response.json(payload, { headers: { "Cache-Control": `public, max-age=${AMAP_SERVICE_AREA_CACHE_TTL}` } });
+      }
+
+      const searchPoints = sampleRouteSearchPoints(highwayPath);
+      const poiBatches = await mapShareWithConcurrency(searchPoints, 3, async ([lng, lat]) => {
+        const aroundUrl = new URL("https://restapi.amap.com/v3/place/around");
+        aroundUrl.searchParams.set("key", webServiceKey);
+        aroundUrl.searchParams.set("location", `${lng.toFixed(6)},${lat.toFixed(6)}`);
+        aroundUrl.searchParams.set("keywords", "服务区");
+        aroundUrl.searchParams.set("radius", "50000");
+        aroundUrl.searchParams.set("sortrule", "distance");
+        aroundUrl.searchParams.set("offset", "25");
+        aroundUrl.searchParams.set("page", "1");
+        aroundUrl.searchParams.set("extensions", "all");
+        aroundUrl.searchParams.set("output", "json");
+        try {
+          const response = await fetch(aroundUrl);
+          if (!response.ok) return [] as unknown[];
+          const payload = await response.json() as { status?: string; pois?: unknown[] };
+          return payload.status === "1" && Array.isArray(payload.pois) ? payload.pois : [];
+        } catch {
+          return [] as unknown[];
+        }
+      });
+      const serviceAreas = rankRouteServiceAreas(poiBatches.flat(), highwayPath);
+      const payload = { status: "1", info: "OK", highway: true, serviceAreas };
+      if (env.ROADBOOK_KV) ctx.waitUntil(env.ROADBOOK_KV.put(cacheKey, JSON.stringify(payload), { expirationTtl: AMAP_SERVICE_AREA_CACHE_TTL }));
+      return Response.json(payload, { headers: { "Cache-Control": `public, max-age=${AMAP_SERVICE_AREA_CACHE_TTL}`, "X-Service-Area-Cache": env.ROADBOOK_KV ? "MISS" : "BYPASS" } });
     }
 
     if (url.pathname === "/api/amap-config") {

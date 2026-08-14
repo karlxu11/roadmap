@@ -57,6 +57,9 @@ type SearchLocation = { lng?: number; lat?: number; getLng?: () => number; getLa
 type SearchResult = { id: string; name: string; address: string; location?: { lng: number; lat: number }; type: string; distance?: number };
 type AMapWebSearchPoi = { id?: string; name?: string; address?: string; location?: string; type?: string; pname?: string; cityname?: string; adname?: string; distance?: number | string };
 type AMapWebSearchPayload = { status?: string; info?: string; pois?: AMapWebSearchPoi[] };
+type RouteServiceArea = { id?: string; name: string; address: string; type: string; lng: number; lat: number; distanceFromStart: number; distanceToRoute: number };
+type ServiceAreaLegState = { status: "loading" } | { status: "ready"; highway: boolean; items: RouteServiceArea[] } | { status: "error" };
+type ServiceAreaPayload = { status?: string; info?: string; highway?: boolean; serviceAreas?: RouteServiceArea[] };
 
 type AMapInstance = {
   Map: new (container: HTMLElement, options: Record<string, unknown>) => AMapMap;
@@ -623,6 +626,8 @@ export default function Home() {
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
   const [legMetrics, setLegMetrics] = useState<Record<string, { status: "loading" | "ready" | "error"; distance?: number; duration?: number; tolls?: number }>>({});
+  const [serviceAreaLegs, setServiceAreaLegs] = useState<Record<string, ServiceAreaLegState>>({});
+  const [activeServiceAreaLeg, setActiveServiceAreaLeg] = useState<string | null>(null);
   const [routeCacheVersion, setRouteCacheVersion] = useState(0);
   const [settings, setSettings] = useState({ jsKey: "", securityCode: "", webKey: "" });
   const [editorWidth, setEditorWidth] = useState(52);
@@ -634,6 +639,7 @@ export default function Home() {
   const routeLineRef = useRef<AMapPolyline | null>(null);
   const routeCacheRef = useRef<RouteCache>({ legs: {}, paths: {}, errors: {} });
   const pendingLegsRef = useRef(new Map<string, Promise<CachedLeg | null>>());
+  const pendingServiceAreasRef = useRef(new Map<string, Promise<void>>());
   const placeSearchRef = useRef<AMapPlaceSearch | null>(null);
   const searchCacheRef = useRef(new Map<string, { results: SearchResult[]; cachedAt: number }>());
   const searchAbortRef = useRef<AbortController | null>(null);
@@ -800,6 +806,11 @@ export default function Home() {
     if (searchDebounceRef.current !== null) window.clearTimeout(searchDebounceRef.current);
     searchAbortRef.current?.abort();
   }, []);
+
+  useEffect(() => {
+    setServiceAreaLegs({});
+    setActiveServiceAreaLeg(null);
+  }, [selectedDayRouteDependencyKey]);
 
   useEffect(() => {
     fetch("/api/amap-config")
@@ -1113,6 +1124,56 @@ export default function Home() {
       [stops[index], stops[nextIndex]] = [stops[nextIndex], stops[index]];
       return { ...day, stops };
     });
+  }
+
+  function insertServiceArea(afterStopId: string, area: RouteServiceArea) {
+    updateSelectedDay((day) => {
+      const index = day.stops.findIndex((stop) => stop.id === afterStopId);
+      if (index < 0) return day;
+      const inserted: Stop = {
+        id: uid("stop"),
+        name: area.name,
+        area: area.address,
+        kind: "途经",
+        lat: area.lat,
+        lng: area.lng,
+        duration: "服务区停靠",
+      };
+      return { ...day, stops: [...day.stops.slice(0, index + 1), inserted, ...day.stops.slice(index + 1)] };
+    });
+    setActiveServiceAreaLeg(null);
+    flash(`已把「${area.name}」加入两个地点之间`);
+  }
+
+  function loadLegServiceAreas(from: Stop, to: Stop) {
+    const key = legCacheKey(from, to);
+    const current = serviceAreaLegs[key];
+    if (current?.status === "loading" || current?.status === "ready") return pendingServiceAreasRef.current.get(key) ?? Promise.resolve();
+    const existing = pendingServiceAreasRef.current.get(key);
+    if (existing) return existing;
+    setServiceAreaLegs((states) => ({ ...states, [key]: { status: "loading" } }));
+    const task = (async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 25_000);
+      try {
+        const params = new URLSearchParams({
+          origin: `${from.lng.toFixed(6)},${from.lat.toFixed(6)}`,
+          destination: `${to.lng.toFixed(6)},${to.lat.toFixed(6)}`,
+        });
+        const response = await fetch(`/api/amap/service-areas?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "force-cache" });
+        if (!response.ok) throw new Error("service-area-search-failed");
+        const payload = await response.json() as ServiceAreaPayload;
+        if (payload.status !== "1") throw new Error(payload.info || "service-area-search-failed");
+        setServiceAreaLegs((states) => ({ ...states, [key]: { status: "ready", highway: Boolean(payload.highway), items: payload.serviceAreas ?? [] } }));
+      } catch {
+        setServiceAreaLegs((states) => ({ ...states, [key]: { status: "error" } }));
+      } finally {
+        window.clearTimeout(timeout);
+        pendingServiceAreasRef.current.delete(key);
+      }
+    })();
+    pendingServiceAreasRef.current.set(key, task);
+    return task;
   }
 
   function setStopAsDeparture(stopId: string) {
@@ -1511,8 +1572,13 @@ export default function Home() {
           <div className="stops-section">
             <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "这是一个只读分享快照，路径、费用和时间已固定" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
             <div className="timeline">
-              {selectedDay.stops.map((stop, index) => (
-                <div className="stop-row" key={stop.id}>
+              {selectedDay.stops.map((stop, index) => {
+                const destination = selectedDay.stops[index + 1];
+                const serviceAreaKey = destination ? legCacheKey(stop, destination) : "";
+                const serviceAreaState = serviceAreaKey ? serviceAreaLegs[serviceAreaKey] : undefined;
+                const hideNonHighwayLeg = serviceAreaState?.status === "ready" && !serviceAreaState.highway;
+                return <div className="stop-leg-group" key={stop.id}>
+                <div className="stop-row">
                   <div className="timeline-rail"><span className={`stop-dot ${stop.kind === "住宿" ? "stay" : ""}`}>{index + 1}</span>{index < selectedDay.stops.length - 1 && <i />}</div>
                   <div className="stop-content">
                     <div className="stop-main">
@@ -1537,7 +1603,14 @@ export default function Home() {
                     {readOnly && stop.note && <div className="stop-note has-note"><span>✦</span><span className="note-text">{stop.note}</span></div>}
                   </div>
                 </div>
-              ))}
+                {destination && !readOnly && !hideNonHighwayLeg && <div className={`leg-service-zone ${activeServiceAreaLeg === serviceAreaKey ? "open" : ""}`} onMouseEnter={() => { setActiveServiceAreaLeg(serviceAreaKey); void loadLegServiceAreas(stop, destination); }} onMouseLeave={() => setActiveServiceAreaLeg((current) => current === serviceAreaKey ? null : current)}>
+                  <button className="leg-service-trigger" type="button" aria-expanded={activeServiceAreaLeg === serviceAreaKey} aria-controls={`service-areas-${stop.id}`} onFocus={() => { setActiveServiceAreaLeg(serviceAreaKey); void loadLegServiceAreas(stop, destination); }} onClick={() => { setActiveServiceAreaLeg((current) => current === serviceAreaKey ? null : serviceAreaKey); void loadLegServiceAreas(stop, destination); }}><span className="leg-service-line" /><span className="leg-service-icon">S</span><span>{serviceAreaState?.status === "loading" ? "正在查找沿途服务区" : serviceAreaState?.status === "ready" ? `沿途 ${serviceAreaState.items.length} 个高速服务区` : serviceAreaState?.status === "error" ? "重新查询沿途服务区" : "悬停查看高速服务区"}</span><span className="leg-service-chevron">⌄</span></button>
+                  {activeServiceAreaLeg === serviceAreaKey && <div className="leg-service-panel" id={`service-areas-${stop.id}`} role="region" aria-label={`${stop.name}到${destination.name}沿途高速服务区`}>
+                    {serviceAreaState?.status === "loading" || !serviceAreaState ? <div className="leg-service-message"><span className="service-loading-dot" />正在沿高速路线查找服务区…</div> : serviceAreaState.status === "error" ? <div className="leg-service-message error">暂时无法读取高德服务区，点击上方重试。</div> : serviceAreaState.items.length ? <><div className="leg-service-panel-head"><span>{stop.name} → {destination.name}</span><strong>{serviceAreaState.items.length} 个服务区</strong></div><div className="leg-service-list">{serviceAreaState.items.map((area) => <button className="leg-service-item" type="button" key={area.id ?? `${area.name}-${area.lng}-${area.lat}`} onClick={() => insertServiceArea(stop.id, area)}><span className="service-area-marker">S</span><span className="service-area-copy"><strong>{area.name}</strong><small>{area.address} · 距本段起点约 {formatDistance(area.distanceFromStart)}</small></span><span className="service-area-add">＋ 插入</span></button>)}</div></> : <div className="leg-service-message">已识别高速路段，暂未搜索到沿线服务区。</div>}
+                  </div>}
+                </div>}
+                </div>;
+              })}
             </div>
             {!readOnly && <button className="inline-add" type="button" onClick={() => setShowAddPlace(true)}>＋ 在这一天添加一个地点</button>}
           </div>

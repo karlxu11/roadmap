@@ -655,3 +655,76 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .stop-navigation-button { border-color: #dce2ff; border-radius: 7px; background: var(--blue-soft); color: var(--blue); }
   .modal-card { padding: 22px; border-radius: 16px; }
 }
+
+/* Highway service areas between itinerary stops. */
+.stop-leg-group { display: grid; gap: 8px; min-width: 0; }
+.stop-leg-group:not(:last-child) .timeline-rail i { bottom: -47px; }
+.leg-service-zone { position: relative; z-index: 3; min-width: 0; margin: -2px 0 1px 44px; }
+.leg-service-trigger {
+  width: 100%;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8792a2;
+  font-size: 10px;
+  text-align: left;
+  opacity: .66;
+  transition: color .18s ease, opacity .18s ease;
+}
+.leg-service-trigger::after, .leg-service-line { content: ""; height: 1px; flex: 1; border-top: 1px dashed #d8dee7; }
+.leg-service-trigger:hover, .leg-service-zone.open .leg-service-trigger, .leg-service-trigger:focus-visible { color: var(--blue); opacity: 1; }
+.leg-service-trigger:hover::after, .leg-service-trigger:hover .leg-service-line, .leg-service-zone.open .leg-service-trigger::after, .leg-service-zone.open .leg-service-line { border-color: #aebbf5; }
+.leg-service-icon {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 1px solid #d8dff0;
+  border-radius: 7px;
+  background: #f4f6ff;
+  color: var(--blue);
+  font-size: 9px;
+  font-weight: 900;
+}
+.leg-service-chevron { color: #a4adba; font-size: 14px; transition: transform .18s ease; }
+.leg-service-zone.open .leg-service-chevron { transform: rotate(180deg); }
+.leg-service-panel {
+  margin: 5px 0 7px;
+  overflow: hidden;
+  border: 1px solid #dfe4f5;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 14px 35px rgba(35, 52, 94, .12);
+  animation: service-panel-in .16s ease-out;
+}
+@keyframes service-panel-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.leg-service-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border-bottom: 1px solid #edf0f5; background: #f8f9ff; color: #6d788b; font-size: 10px; }
+.leg-service-panel-head span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.leg-service-panel-head strong { flex-shrink: 0; color: var(--blue); font-size: 10px; }
+.leg-service-list { display: grid; max-height: 260px; overflow-y: auto; padding: 5px; }
+.leg-service-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 9px; border: 0; border-radius: 9px; background: transparent; color: #27344a; text-align: left; }
+.leg-service-item:hover, .leg-service-item:focus-visible { background: #f3f5ff; }
+.service-area-marker { width: 28px; height: 28px; display: grid; place-items: center; flex-shrink: 0; border-radius: 9px; background: #e9edff; color: var(--blue); font-size: 10px; font-weight: 900; }
+.service-area-copy { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.service-area-copy strong { overflow: hidden; color: #344159; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.service-area-copy small { overflow: hidden; color: #8a94a4; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.service-area-add { flex-shrink: 0; padding: 6px 8px; border-radius: 7px; background: var(--blue-soft); color: var(--blue); font-size: 10px; font-weight: 800; }
+.leg-service-message { min-height: 66px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 16px; color: #7d8899; font-size: 11px; text-align: center; }
+.leg-service-message.error { color: #b1654c; }
+.service-loading-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 4px rgba(53, 89, 217, .12); animation: service-loading 1s ease-in-out infinite; }
+@keyframes service-loading { 50% { opacity: .35; transform: scale(.8); } }
+
+@media (max-width: 760px) {
+  .stop-leg-group { gap: 7px; }
+  .stop-leg-group:not(:last-child) .timeline-rail i { bottom: -45px; }
+  .leg-service-zone { margin-left: 36px; }
+  .leg-service-trigger { min-height: 32px; opacity: .9; }
+  .leg-service-trigger::after { display: none; }
+  .leg-service-list { max-height: 220px; }
+  .service-area-copy small { white-space: normal; line-height: 1.4; }
+}
