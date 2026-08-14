@@ -301,6 +301,7 @@ const worker = {
       if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) return Response.json({ ok: false, error: "invalid_token" }, { status: 400 });
       const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`, "json");
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
+      ctx.waitUntil(prepareShareSnapshot(env, token, snapshot).catch(() => undefined));
       return Response.json({ ok: true, snapshot }, { headers: { "Cache-Control": "no-store" } });
     }
 
