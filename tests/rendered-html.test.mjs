@@ -27,6 +27,7 @@ test("server-renders the roadbook workspace", async () => {
   assert.match(html, /type="time"/);
   assert.match(html, /总时长/);
   assert.match(html, /我的路书/);
+  assert.match(html, /分享管理/);
   assert.match(html, /新路书/);
   assert.match(html, /导出 PDF/);
   assert.match(html, /路书 · ROAM NOTE \| 由高德路线数据辅助整理/);
@@ -46,6 +47,7 @@ test("stores share snapshots behind a short token", async () => {
   const kv = {
     async put(key, value) { records.set(key, JSON.parse(value)); },
     async get(key) { return records.get(key) ?? null; },
+    async delete(key) { records.delete(key); },
   };
   const snapshot = { version: 1, roadbook: { days: [] }, legs: {}, createdAt: new Date().toISOString() };
   const createResponse = await worker.fetch(
@@ -73,6 +75,15 @@ test("stores share snapshots behind a short token", async () => {
   );
   assert.equal(readResponse.status, 200);
   assert.deepEqual((await readResponse.json()).snapshot, updatedSnapshot);
+
+  const listResponse = await worker.fetch(new Request("http://localhost/api/shares"), { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv }, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(listResponse.status, 200);
+  assert.equal((await listResponse.json()).links.length, 1);
+
+  const revokeResponse = await worker.fetch(new Request(`http://localhost/api/shares?token=${token}`, { method: "DELETE" }), { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv }, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(revokeResponse.status, 200);
+  const revokedReadResponse = await worker.fetch(new Request(`http://localhost/api/shares?token=${token}`), { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv }, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(revokedReadResponse.status, 404);
 });
 
 test("share pages bypass the editor password", async () => {

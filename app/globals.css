@@ -18,6 +18,8 @@ button { cursor: pointer; }
 .library-button, .new-roadbook-button { height: 32px; padding: 0 10px; border-radius: 6px; font-size: 10px; font-weight: 700; }
 .library-button { border: 1px solid var(--line); background: transparent; color: #6f7c71; }
 .library-button span { margin-left: 4px; color: var(--orange); }
+.share-manager-button { height: 32px; padding: 0 10px; border: 1px solid #d7e1d2; border-radius: 6px; background: #f6faf3; color: var(--green); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.share-manager-button:hover { border-color: #a9bea3; background: #edf5e9; color: var(--deep); }
 .new-roadbook-button { border: 1px solid #d8a487; background: #fff7ef; color: var(--orange); }
 .new-roadbook-button:hover { background: #fff0e3; }
 .sync-status { display: inline-flex; align-items: center; height: 32px; padding: 0; border: 0; background: transparent; color: #89938a; font-size: 10px; white-space: nowrap; }
@@ -122,6 +124,30 @@ button { cursor: pointer; }
 .new-roadbook-form input { padding: 11px 12px; border: 1px solid #dde3d8; border-radius: 6px; outline: 0; background: #fff; color: var(--ink); font-size: 12px; }
 .new-roadbook-form input:focus { border-color: #b2c4ad; box-shadow: 0 0 0 3px rgba(150, 178, 149, .12); }
 .new-roadbook-form .primary-button { width: 100%; margin-top: 3px; }
+.share-manager-modal { width: min(650px, 100%); }
+.share-manager-head-actions { display: flex; align-items: center; gap: 8px; }
+.refresh-share-button { width: 28px; height: 28px; border: 1px solid #dfe5da; border-radius: 50%; background: #f6f8f2; color: #829181; font-size: 17px; }
+.refresh-share-button:hover { border-color: #b7c9b2; color: var(--green); }
+.share-manager-lead { margin: 16px 0 21px; color: #8f9a90; font-size: 11px; line-height: 1.7; }
+.share-link-list { display: grid; gap: 8px; max-height: 390px; overflow: auto; }
+.share-link-item { display: flex; align-items: center; gap: 11px; padding: 13px 12px; border: 1px solid #e6ebe1; border-radius: 8px; background: #fff; }
+.share-link-item.expired { background: #fafaf7; }
+.share-link-icon { width: 29px; height: 29px; display: grid; place-items: center; flex-shrink: 0; border-radius: 8px; background: #fdf0e7; color: var(--orange); font-size: 17px; }
+.share-link-copy { display: grid; gap: 5px; min-width: 0; flex: 1; }
+.share-link-copy strong { overflow: hidden; color: #526157; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.share-link-copy small, .share-link-copy span { color: #9aa59a; font-size: 9px; }
+.share-link-copy span { color: #718071; }
+.share-link-item.expired .share-link-copy span { color: #b1846b; }
+.share-link-actions { display: flex; flex-shrink: 0; gap: 6px; }
+.share-link-actions button { padding: 6px 8px; border: 1px solid #dfe5da; border-radius: 5px; background: #f8faf5; color: #718071; font-size: 10px; }
+.share-link-actions button:hover { border-color: #aec1aa; background: #f0f6ed; color: var(--deep); }
+.share-link-actions button.danger { border-color: #ead5c8; background: #fff8f1; color: #b47758; }
+.share-link-actions button.danger:hover { border-color: #dcae93; background: #fff0e3; color: var(--orange); }
+.share-link-actions button.muted { color: #a5ada4; }
+.share-manager-empty { min-height: 170px; display: grid; place-content: center; justify-items: center; color: #b0b8af; font-size: 11px; }
+.share-manager-empty > span { color: #d6b28f; font-size: 25px; }
+.share-manager-empty p { margin: 10px 0 0; }
+.share-manager-empty small { margin-top: 7px; color: #b0b8af; font-size: 9px; }
 .print-only { display: none; }
 .roadbook-print { color: #17221f; }
 .print-cover { min-height: 215px; padding-bottom: 28px; border-bottom: 2px solid #17221f; }
@@ -145,7 +171,7 @@ button { cursor: pointer; }
 .print-day-total { display: flex; gap: 8px; margin-top: 5px; padding-top: 8px; border-top: 1px solid #e5e9e0; color: #78877b; font-size: 10px; }
 .print-day-total strong { color: #5e7b62; font-size: 10px; }
 @media print { @page { size: A4; margin: 14mm; } html, body { background: #fff; } body { color: #17221f; } .app-shell { min-height: 0; overflow: visible; } .topbar, .workspace, .modal-backdrop, .toast, .map-error { display: none !important; } .print-only { display: block !important; } }
-@media (max-width: 760px) { .topbar { height: 68px; padding: 0 18px; }.brand-tagline, .trip-status { display: none; }.workspace { display: block; }.sidebar { padding: 22px 16px 16px; border-right: 0; border-bottom: 1px solid var(--line); }.sidebar-intro { padding-bottom: 20px; }.sidebar h1 { margin-top: 9px; font-size: 23px; }.day-list { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 5px; }.day-wrap { min-width: 190px; }.day-card { min-height: 62px; }.insert-line, .day-hover-actions, .add-day-button, .sidebar-bottom { display: none; }.editor-pane { padding: 30px 20px 35px; }.editor-head { display: block; }.editor-actions { margin-top: 21px; align-items: center; }.stats-strip { gap: 16px; margin: 28px 0 30px; overflow: auto; }.route-state { display: none; }.section-heading { display: block; }.section-note { display: block; margin-bottom: 21px; }.map-panel { min-height: 440px; }.map-wrap { min-height: 370px; }.map-bottom, .map-topbar { padding-left: 18px; padding-right: 18px; }.fallback-marker label { max-width: 80px; overflow: hidden; text-overflow: ellipsis; }.map-message { width: 245px; } }
+@media (max-width: 760px) { .topbar { height: 68px; padding: 0 18px; }.brand-tagline, .trip-status { display: none; }.top-actions { gap: 6px; }.share-manager-button { width: 32px; padding: 0; font-size: 0; }.share-manager-button::before { content: "↗"; font-size: 15px; }.workspace { display: block; }.sidebar { padding: 22px 16px 16px; border-right: 0; border-bottom: 1px solid var(--line); }.sidebar-intro { padding-bottom: 20px; }.sidebar h1 { margin-top: 9px; font-size: 23px; }.day-list { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 5px; }.day-wrap { min-width: 190px; }.day-card { min-height: 62px; }.insert-line, .day-hover-actions, .add-day-button, .sidebar-bottom { display: none; }.editor-pane { padding: 30px 20px 35px; }.editor-head { display: block; }.editor-actions { margin-top: 21px; align-items: center; }.stats-strip { gap: 16px; margin: 28px 0 30px; overflow: auto; }.route-state { display: none; }.section-heading { display: block; }.section-note { display: block; margin-bottom: 21px; }.map-panel { min-height: 440px; }.map-wrap { min-height: 370px; }.map-bottom, .map-topbar { padding-left: 18px; padding-right: 18px; }.fallback-marker label { max-width: 80px; overflow: hidden; text-overflow: ellipsis; }.map-message { width: 245px; } }
 
 /* Stop notes */
 .stop-note { display: flex; align-items: center; gap: 7px; min-height: 31px; margin-top: 12px; padding: 7px 10px; border-radius: 5px; background: #faf9f3; color: #9a9f96; font-size: 10px; }

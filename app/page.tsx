@@ -42,6 +42,15 @@ type SharedSnapshot = {
   paths?: Record<string, Array<[number, number]>>;
   createdAt: string;
 };
+type ShareLink = {
+  token?: string;
+  url: string;
+  roadbookId: string;
+  roadbookTitle: string;
+  createdAt: string;
+  expiresAt: string;
+  storage: "cloud" | "browser";
+};
 
 type SearchLocation = { lng?: number; lat?: number; getLng?: () => number; getLat?: () => number };
 type SearchResult = { id: string; name: string; address: string; location?: { lng: number; lat: number }; type: string };
@@ -95,6 +104,8 @@ const ROUTE_REQUEST_CONCURRENCY = 4;
 const ROUTE_CACHE_PATH_MAX_POINTS = 240;
 const SEARCH_CACHE_TTL = 10 * 60 * 1000;
 const SHARE_QUERY_KEY = "share";
+const SHARE_LINKS_KEY = "roadbook-share-links-v1";
+const SHARE_LINK_TTL = 30 * 24 * 60 * 60 * 1000;
 
 type CachedLeg = { distance?: number; duration?: number; tolls?: number | null; path?: Array<[number, number]>; cachedAt: number };
 type RouteCache = { legs: Record<string, CachedLeg>; paths: Record<string, Array<[number, number]>>; errors: Record<string, number> };
@@ -438,6 +449,25 @@ function saveRoadbooks(roadbooks: Roadbook[]) {
   window.localStorage.setItem(ROADBOOK_LIBRARY_KEY, JSON.stringify(roadbooks));
 }
 
+function loadLocalShareLinks(): ShareLink[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(SHARE_LINKS_KEY) ?? "[]") as ShareLink[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item) => item && typeof item.url === "string" && typeof item.roadbookTitle === "string");
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalShareLinks(links: ShareLink[]) {
+  try {
+    window.localStorage.setItem(SHARE_LINKS_KEY, JSON.stringify(links));
+  } catch {
+    // Share management is a convenience cache; the cloud index remains authoritative when configured.
+  }
+}
+
 async function fetchRemoteRoadbooks() {
   const response = await fetch("/api/roadbooks", { headers: { Accept: "application/json" }, cache: "no-store" });
   if (!response.ok) throw new Error(`roadbook-storage-${response.status}`);
@@ -555,6 +585,9 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAddPlace, setShowAddPlace] = useState(false);
   const [showLibrary, setShowLibrary] = useState(false);
+  const [showShareManager, setShowShareManager] = useState(false);
+  const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
+  const [isLoadingShareLinks, setIsLoadingShareLinks] = useState(false);
   const [showCumulativeTolls, setShowCumulativeTolls] = useState(false);
   const [editingNoteStopId, setEditingNoteStopId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -898,6 +931,74 @@ export default function Home() {
   function flash(message: string) {
     setShowToast(message);
     window.setTimeout(() => setShowToast(""), 2200);
+  }
+
+  function shareUrlForToken(token: string) {
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.searchParams.set(SHARE_QUERY_KEY, token);
+    url.hash = "";
+    return url.toString();
+  }
+
+  function rememberShareLink(link: ShareLink) {
+    const next = [link, ...loadLocalShareLinks().filter((item) => item.token !== link.token && item.url !== link.url)];
+    saveLocalShareLinks(next);
+    setShareLinks(next);
+  }
+
+  async function refreshShareLinks() {
+    setIsLoadingShareLinks(true);
+    const localLinks = loadLocalShareLinks();
+    setShareLinks(localLinks);
+    try {
+      const response = await fetch("/api/shares", { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) return;
+      const payload = await response.json() as { links?: Array<Omit<ShareLink, "url" | "storage"> & { token: string }> };
+      const cloudLinks: ShareLink[] = (payload.links ?? []).map((link) => ({ ...link, url: shareUrlForToken(link.token), storage: "cloud" }));
+      const browserLinks = localLinks.filter((link) => link.storage === "browser");
+      const next = [...cloudLinks, ...browserLinks.filter((link) => !cloudLinks.some((cloudLink) => cloudLink.token === link.token))];
+      saveLocalShareLinks(next);
+      setShareLinks(next);
+    } catch {
+      // The local cache still makes link management useful during local development without KV.
+    } finally {
+      setIsLoadingShareLinks(false);
+    }
+  }
+
+  function openShareManager() {
+    setShowShareManager(true);
+    void refreshShareLinks();
+  }
+
+  async function copyShareLink(link: ShareLink) {
+    try {
+      await navigator.clipboard.writeText(link.url);
+      flash("分享链接已复制");
+    } catch {
+      flash("复制失败，请检查浏览器剪贴板权限");
+    }
+  }
+
+  async function revokeShareLink(link: ShareLink) {
+    if (link.storage === "browser" || !link.token) {
+      const next = loadLocalShareLinks().filter((item) => item.url !== link.url);
+      saveLocalShareLinks(next);
+      setShareLinks(next);
+      flash("已从当前设备移除链接记录");
+      return;
+    }
+    try {
+      const response = await fetch(`/api/shares?token=${encodeURIComponent(link.token)}`, { method: "DELETE", cache: "no-store" });
+      if (!response.ok) throw new Error("revoke-failed");
+      const next = loadLocalShareLinks().filter((item) => item.token !== link.token);
+      saveLocalShareLinks(next);
+      setShareLinks(next);
+      flash("分享链接已失效");
+    } catch {
+      flash("链接失效失败，请稍后重试");
+    }
   }
 
   function updateActiveDays(updater: (days: DayPlan[]) => DayPlan[]) {
@@ -1256,12 +1357,17 @@ export default function Home() {
         // Local development without KV falls back to the legacy inline snapshot link.
       }
       if (!shareUrl) {
-        const url = new URL(window.location.href);
-        url.search = "";
-        url.searchParams.set(SHARE_QUERY_KEY, encodeShareSnapshot(snapshot));
-        url.hash = "";
-        shareUrl = url.toString();
+        shareUrl = shareUrlForToken(encodeShareSnapshot(snapshot));
       }
+      rememberShareLink({
+        token: shareToken || undefined,
+        url: shareUrl,
+        roadbookId: activeRoadbook.id,
+        roadbookTitle: activeRoadbook.title,
+        createdAt: snapshot.createdAt,
+        expiresAt: new Date(Date.now() + SHARE_LINK_TTL).toISOString(),
+        storage: shareToken ? "cloud" : "browser",
+      });
       const prepareAndUpdate = async () => {
         await prepareShareData(activeRoadbook);
         if (!shareToken) return;
@@ -1314,7 +1420,7 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          {readOnly ? <div className="share-mode-label"><span>只读分享</span><small>路径 · 费用 · 时间已记录</small></div> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
+          {readOnly ? <div className="share-mode-label"><span>只读分享</span><small>路径 · 费用 · 时间已记录</small></div> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
         </div>
       </header>
 
@@ -1447,6 +1553,7 @@ export default function Home() {
       </div>
 
       {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} />}
+      {showShareManager && <ShareManagerModal links={shareLinks} isLoading={isLoadingShareLinks} onClose={() => setShowShareManager(false)} onRefresh={() => void refreshShareLinks()} onCopy={(link) => void copyShareLink(link)} onRevoke={(link) => void revokeShareLink(link)} />}
       {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{result.address} · {result.type}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在等待搜索结果，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">提示：搜索会在停止输入约 400ms 后自动执行；优先使用高德 Web 服务搜索。</div></div></div>}
 
       {showCumulativeTolls && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowCumulativeTolls(false)}><div className="modal-card cumulative-tolls-modal" role="dialog" aria-modal="true" aria-labelledby="cumulative-tolls-title"><div className="modal-head"><div><span className="eyebrow">TOLL CALCULATOR</span><h2 id="cumulative-tolls-title">截至第 {selectedDayIndex + 1} 天</h2></div><button type="button" className="modal-close" onClick={() => setShowCumulativeTolls(false)} aria-label="关闭累计高速费">×</button></div><p className="cumulative-tolls-lead">从 {days[0]?.date ?? "出发日"} 出发，累计计算到 {selectedDay.date} 的所有行程高速费。</p><div className="cumulative-tolls-total"><span>累计高速费</span><strong>{cumulativeTollsComplete ? formatTolls(cumulativeTollsAmount) : readOnly ? "未记录" : amapLoaded ? "正在计算…" : "待获取"}</strong></div><div className="cumulative-tolls-list">{cumulativeTollDays.map(({ day, complete, amount }, index) => <div className="cumulative-toll-row" key={day.id}><div><strong>第 {index + 1} 天 · {day.date}</strong><small>{day.title}</small></div><span>{complete ? formatTolls(amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span></div>)}</div>{!cumulativeTollsComplete && !readOnly && !amapLoaded && <div className="modal-foot">请先连接高德地图，路线规划完成后再次打开这里即可看到累计高速费。</div>}<div className="modal-actions"><button className="primary-button" type="button" onClick={() => setShowCumulativeTolls(false)}>知道了 <span>→</span></button></div></div></div>}
@@ -1462,6 +1569,11 @@ function RoadbookLibraryModal({ roadbooks, activeRoadbookId, onClose, onSelect, 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card library-modal"><div className="modal-head"><div><span className="eyebrow">MY ROADBOOKS</span><h2>我的路书</h2></div><button type="button" className="modal-close" onClick={onClose}>×</button></div><div className="roadbook-list">{roadbooks.map((roadbook) => <button className={`roadbook-item ${roadbook.id === activeRoadbookId ? "active" : ""}`} type="button" key={roadbook.id} onClick={() => onSelect(roadbook.id)}><span className="roadbook-icon">⌁</span><span className="roadbook-item-copy"><strong>{roadbook.title}</strong><small>{roadbook.region} · {roadbook.days.length} 天 · {roadbook.days.reduce((sum, day) => sum + day.stops.length, 0)} 个地点</small></span><span className="roadbook-item-arrow">{roadbook.id === activeRoadbookId ? "当前" : "打开 →"}</span></button>)}</div><div className="new-roadbook-form"><div className="form-title"><span>＋</span><strong>创建一条新路书</strong></div><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="路书名称，例如：滇西环线" /><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="一句话描述（可选）" /><button className="primary-button" type="button" onClick={() => onCreate(title, description)}>创建并开始编辑 <span>→</span></button></div><div className="modal-foot">每条路书独立保存，之后可以随时切换，不会覆盖其他行程。</div></div></div>;
+}
+
+function ShareManagerModal({ links, isLoading, onClose, onRefresh, onCopy, onRevoke }: { links: ShareLink[]; isLoading: boolean; onClose: () => void; onRefresh: () => void; onCopy: (link: ShareLink) => void; onRevoke: (link: ShareLink) => void }) {
+  const [now] = useState(() => Date.now());
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card share-manager-modal" role="dialog" aria-modal="true" aria-labelledby="share-manager-title"><div className="modal-head"><div><span className="eyebrow">SHARE LINKS</span><h2 id="share-manager-title">分享管理</h2></div><div className="share-manager-head-actions"><button className="refresh-share-button" type="button" onClick={onRefresh} aria-label="刷新分享链接">↻</button><button type="button" className="modal-close" onClick={onClose}>×</button></div></div><p className="share-manager-lead">管理已经发出去的路书链接。云端链接可随时失效，默认有效期 30 天。</p><div className="share-link-list">{isLoading && !links.length ? <div className="share-manager-empty"><span>…</span><p>正在读取分享记录</p></div> : links.length ? links.map((link) => { const expired = new Date(link.expiresAt).getTime() <= now; return <div className={`share-link-item ${expired ? "expired" : ""}`} key={link.token ?? link.url}><div className="share-link-icon">↗</div><div className="share-link-copy"><strong>{link.roadbookTitle}</strong><small>{link.storage === "cloud" ? "云端链接" : "当前设备链接"} · 创建于 {new Date(link.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}</small><span>{expired ? "已过期" : `有效至 ${new Date(link.expiresAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`}</span></div><div className="share-link-actions"><button type="button" onClick={() => onCopy(link)}>复制</button><button className={link.storage === "cloud" && !expired ? "danger" : "muted"} type="button" onClick={() => onRevoke(link)}>{link.storage === "cloud" && !expired ? "失效" : "移除"}</button></div></div>; }) : <div className="share-manager-empty"><span>↗</span><p>还没有创建过分享链接</p><small>在路书编辑页点击“分享路书”后，链接会出现在这里。</small></div>}</div><div className="modal-foot">当前设备链接是未配置 KV 时的本地备用方案，只能从这里移除记录；部署 KV 后可获得真正的撤销能力。</div></div></div>;
 }
 
 function SettingsModal({ settings, onClose, onSave }: { settings: { jsKey: string; securityCode: string; webKey: string }; onClose: () => void; onSave: (settings: { jsKey: string; securityCode: string; webKey: string }) => void }) {

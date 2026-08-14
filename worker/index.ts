@@ -28,6 +28,8 @@ const ACCESS_COOKIE = "roadbook_access";
 const ACCESS_MAX_AGE = 60 * 60 * 24 * 30;
 const ROADBOOK_STORAGE_KEY = "roadbooks:default";
 const SHARE_STORAGE_PREFIX = "roadbook-share:";
+const SHARE_INDEX_KEY = "roadbook-shares:index";
+const SHARE_LINK_TTL = 60 * 60 * 24 * 30;
 const AMAP_ROUTE_CACHE_TTL = 60 * 60 * 24;
 const AMAP_ROUTE_CACHE_PREFIX = "amap-route-v1:";
 const AMAP_SEARCH_CACHE_TTL = 60 * 10;
@@ -46,11 +48,12 @@ type NormalizedRoute = {
 type ShareStop = { id?: string; lng?: number; lat?: number };
 type ShareSnapshot = {
   version: 1;
-  roadbook: { days: Array<{ stops?: ShareStop[] }> };
+  roadbook: { id?: string; title?: string; days: Array<{ stops?: ShareStop[] }> };
   legs: Record<string, { distance?: number; duration?: number; tolls?: number }>;
   paths?: Record<string, Array<[number, number]>>;
   createdAt: string;
 };
+type ShareLinkRecord = { token: string; roadbookId: string; roadbookTitle: string; createdAt: string; expiresAt: string };
 type AMapSearchPayload = { status?: string; info?: string; pois?: unknown[]; [key: string]: unknown };
 function normalizeCoordinate(value: string | null) {
   if (!value) return null;
@@ -229,6 +232,21 @@ function isShareSnapshot(value: unknown): value is ShareSnapshot {
   return snapshot.version === 1 && typeof snapshot.createdAt === "string" && Boolean(snapshot.roadbook && typeof snapshot.roadbook === "object" && Array.isArray((snapshot.roadbook as { days?: unknown }).days)) && Boolean(snapshot.legs && typeof snapshot.legs === "object");
 }
 
+async function readShareIndex(env: Env) {
+  if (!env.ROADBOOK_KV) return [] as ShareLinkRecord[];
+  const value = await env.ROADBOOK_KV.get(SHARE_INDEX_KEY, "json") as unknown;
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is ShareLinkRecord => Boolean(item && typeof item === "object"
+    && typeof (item as ShareLinkRecord).token === "string"
+    && typeof (item as ShareLinkRecord).roadbookTitle === "string"
+    && typeof (item as ShareLinkRecord).createdAt === "string"
+    && typeof (item as ShareLinkRecord).expiresAt === "string"));
+}
+
+async function writeShareIndex(env: Env, links: ShareLinkRecord[]) {
+  if (env.ROADBOOK_KV) await env.ROADBOOK_KV.put(SHARE_INDEX_KEY, JSON.stringify(links));
+}
+
 function isPublicAssetPath(pathname: string) {
   return pathname.startsWith("/_next/") || pathname.startsWith("/_vinext/") || pathname === "/favicon.svg" || pathname === "/favicon.ico";
 }
@@ -289,7 +307,10 @@ const worker = {
       const tokenBytes = new Uint8Array(18);
       crypto.getRandomValues(tokenBytes);
       const token = toBase64Url(tokenBytes);
-      await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
+      const expiresAt = new Date(Date.now() + SHARE_LINK_TTL * 1000).toISOString();
+      await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: SHARE_LINK_TTL });
+      const index = await readShareIndex(env);
+      await writeShareIndex(env, [{ token, roadbookId: snapshot.roadbook.id ?? "", roadbookTitle: snapshot.roadbook.title ?? "未命名路书", createdAt: snapshot.createdAt, expiresAt }, ...index.filter((link) => link.token !== token)]);
       ctx.waitUntil(prepareShareSnapshot(env, token, snapshot));
       return Response.json({ ok: true, token }, { headers: { "Cache-Control": "no-store" } });
     }
@@ -307,18 +328,34 @@ const worker = {
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "invalid_snapshot" }, { status: 400 });
       const existing = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`);
       if (existing === null) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
-      await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
+      await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: SHARE_LINK_TTL });
+      const index = await readShareIndex(env);
+      await writeShareIndex(env, index.map((link) => link.token === token ? { ...link, roadbookId: snapshot.roadbook.id ?? link.roadbookId, roadbookTitle: snapshot.roadbook.title ?? link.roadbookTitle } : link));
       return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     }
 
     if (url.pathname === "/api/shares" && request.method === "GET") {
       if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503 });
       const token = url.searchParams.get("token")?.trim() ?? "";
+      if (!token) {
+        return Response.json({ ok: true, links: await readShareIndex(env) }, { headers: { "Cache-Control": "no-store" } });
+      }
       if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) return Response.json({ ok: false, error: "invalid_token" }, { status: 400 });
       const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`, "json");
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
       ctx.waitUntil(prepareShareSnapshot(env, token, snapshot).catch(() => undefined));
       return Response.json({ ok: true, snapshot }, { headers: { "Cache-Control": "no-store" } });
+    }
+
+    if (url.pathname === "/api/shares" && request.method === "DELETE") {
+      if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503 });
+      const token = url.searchParams.get("token")?.trim() ?? "";
+      if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) return Response.json({ ok: false, error: "invalid_token" }, { status: 400 });
+      const existing = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`);
+      if (existing === null) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
+      await env.ROADBOOK_KV.delete(`${SHARE_STORAGE_PREFIX}${token}`);
+      await writeShareIndex(env, (await readShareIndex(env)).filter((link) => link.token !== token));
+      return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     }
 
     if (url.pathname === "/api/roadbooks" && request.method === "GET") {
