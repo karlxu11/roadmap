@@ -93,8 +93,11 @@ const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
 const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
 const SHARE_QUERY_KEY = "share";
 
-type CachedLeg = { distance?: number; duration?: number; tolls?: number; cachedAt: number };
+type CachedLeg = { distance?: number; duration?: number; tolls?: number | null; cachedAt: number };
 type RouteCache = { legs: Record<string, CachedLeg>; paths: Record<string, Array<[number, number]>> };
+
+// 高德偶尔会返回完整的距离/时长，但不返回 tolls。用 null 记录这种结果，
+// 否则每次刷新都会把同一路段误判为未缓存并再次请求。
 
 function routeCacheKey(stops: Stop[]) {
   return stops.map((stop) => `${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|");
@@ -108,7 +111,21 @@ function loadRouteCache(): RouteCache {
   if (typeof window === "undefined") return { legs: {}, paths: {} };
   try {
     const parsed = JSON.parse(window.localStorage.getItem(ROUTE_CACHE_KEY) ?? "null") as Partial<RouteCache> | null;
-    return { legs: parsed?.legs ?? {}, paths: parsed?.paths ?? {} };
+    const legs = Object.fromEntries(Object.entries(parsed?.legs ?? {}).flatMap(([key, value]) => {
+      if (!value || typeof value !== "object") return [];
+      const candidate = value as Partial<CachedLeg>;
+      if (typeof candidate.cachedAt !== "number" || !Number.isFinite(candidate.cachedAt)
+        || typeof candidate.distance !== "number" || !Number.isFinite(candidate.distance)
+        || typeof candidate.duration !== "number" || !Number.isFinite(candidate.duration)) return [];
+      const tolls = typeof candidate.tolls === "number" && Number.isFinite(candidate.tolls) ? candidate.tolls : null;
+      return [[key, { distance: candidate.distance, duration: candidate.duration, tolls, cachedAt: candidate.cachedAt } satisfies CachedLeg]];
+    }));
+    const paths = Object.fromEntries(Object.entries(parsed?.paths ?? {}).flatMap(([key, value]) => {
+      if (!Array.isArray(value) || value.length < 2) return [];
+      const path = value.filter((point): point is [number, number] => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+      return path.length >= 2 ? [[key, path]] : [];
+    }));
+    return { legs, paths };
   } catch {
     return { legs: {}, paths: {} };
   }
@@ -120,6 +137,24 @@ function saveRouteCache(cache: RouteCache) {
   } catch {
     // Route data is only a disposable optimization cache.
   }
+}
+
+function isFreshCachedLeg(leg: CachedLeg | undefined, now = Date.now()) {
+  return Boolean(
+    leg
+    && Number.isFinite(leg.cachedAt)
+    && now - leg.cachedAt < ROUTE_CACHE_TTL
+    && Number.isFinite(leg.distance)
+    && Number.isFinite(leg.duration),
+  );
+}
+
+function displayCachedLeg(leg: CachedLeg) {
+  return {
+    distance: leg.distance,
+    duration: leg.duration,
+    tolls: typeof leg.tolls === "number" ? leg.tolls : undefined,
+  };
 }
 
 function encodeShareSnapshot(snapshot: SharedSnapshot) {
@@ -437,7 +472,7 @@ export default function Home() {
       : routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])]));
     const complete = sharedSnapshot
       ? cachedLegs.every((leg) => leg && typeof leg.tolls === "number")
-      : cachedLegs.every((leg) => leg && typeof leg.tolls === "number" && now - ((leg as CachedLeg).cachedAt ?? 0) < ROUTE_CACHE_TTL);
+      : cachedLegs.every((leg) => isFreshCachedLeg(leg as CachedLeg, now) && typeof leg?.tolls === "number");
     return {
       complete,
       amount: complete ? cachedLegs.reduce((sum, leg) => sum + (leg?.tolls ?? 0), 0) : undefined,
@@ -453,7 +488,7 @@ export default function Home() {
         const current = day.id === selectedDay.id ? displayLegMetrics[stop.id] : undefined;
         if (current?.status === "ready") return current;
         const cached = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
-        return cached && typeof cached.tolls === "number" && now - cached.cachedAt < ROUTE_CACHE_TTL ? cached : undefined;
+        return isFreshCachedLeg(cached, now) ? cached : undefined;
       });
       const complete = metrics.every((metric) => metric && typeof metric.tolls === "number");
       return {
@@ -640,8 +675,8 @@ export default function Home() {
     const selectedLegs = selectedDay.stops.slice(0, -1);
     const initialMetrics = Object.fromEntries(selectedLegs.map((stop, index) => {
       const cached = routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])];
-      const fresh = cached && typeof cached.tolls === "number" && now - cached.cachedAt < ROUTE_CACHE_TTL;
-      return [stop.id, fresh ? { status: "ready" as const, distance: cached.distance, duration: cached.duration, tolls: cached.tolls } : { status: "loading" as const }];
+      const fresh = isFreshCachedLeg(cached, now);
+      return [stop.id, fresh ? { status: "ready" as const, ...displayCachedLeg(cached) } : { status: "loading" as const }];
     }));
     setLegMetrics(initialMetrics);
 
@@ -653,7 +688,7 @@ export default function Home() {
     })));
     const missingLegs = allLegs.filter(({ key }) => {
       const cached = routeCacheRef.current.legs[key];
-      return !cached || typeof cached.tolls !== "number" || now - cached.cachedAt >= ROUTE_CACHE_TTL;
+      return !isFreshCachedLeg(cached, now);
     });
     const requestLeg = (stop: Stop, destination: Stop, key: string) => {
       const pending = pendingLegsRef.current.get(key);
@@ -664,7 +699,9 @@ export default function Home() {
         driving.search(new window.AMap!.LngLat(stop.lng, stop.lat), new window.AMap!.LngLat(destination.lng, destination.lat), { extensions: "all" }, (status, result) => {
           window.clearTimeout(timeout);
           const route = typeof result === "object" ? result.routes?.[0] : undefined;
-          resolve(status === "complete" && route ? { distance: route.distance, duration: route.time, tolls: route.tolls, cachedAt: Date.now() } : null);
+          resolve(status === "complete" && route && Number.isFinite(route.distance) && Number.isFinite(route.time)
+            ? { distance: route.distance, duration: route.time, tolls: typeof route.tolls === "number" && Number.isFinite(route.tolls) ? route.tolls : null, cachedAt: Date.now() }
+            : null);
         });
       });
       pendingLegsRef.current.set(key, promise);
@@ -677,7 +714,7 @@ export default function Home() {
         saveRouteCache(routeCacheRef.current);
         setRouteCacheVersion((version) => version + 1);
       }
-      if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.map(({ stopId, metric }) => [stopId, metric ? { status: "ready" as const, distance: metric.distance, duration: metric.duration, tolls: metric.tolls } : { status: "error" as const }])) }));
+      if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.map(({ stopId, metric }) => [stopId, metric ? { status: "ready" as const, ...displayCachedLeg(metric) } : { status: "error" as const }])) }));
     });
     return () => { cancelled = true; };
   }, [amapLoaded, days, readOnly, selectedDay, storageStatus]);
@@ -940,7 +977,7 @@ export default function Home() {
       const cached = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
       const current = legMetrics[stop.id];
       const metric = current?.status === "ready" ? current : cached;
-      return [stop.id, metric ? { distance: metric.distance, duration: metric.duration, tolls: metric.tolls } : {}];
+      return [stop.id, metric ? { distance: metric.distance, duration: metric.duration, tolls: typeof metric.tolls === "number" ? metric.tolls : undefined } : {}];
     })));
     const snapshot: SharedSnapshot = {
       version: 1,
