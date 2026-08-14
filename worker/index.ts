@@ -43,6 +43,14 @@ type NormalizedRoute = {
     path: Array<[number, number]>;
   };
 };
+type ShareStop = { id?: string; lng?: number; lat?: number };
+type ShareSnapshot = {
+  version: 1;
+  roadbook: { days: Array<{ stops?: ShareStop[] }> };
+  legs: Record<string, { distance?: number; duration?: number; tolls?: number }>;
+  paths?: Record<string, Array<[number, number]>>;
+  createdAt: string;
+};
 type AMapSearchPayload = { status?: string; info?: string; pois?: unknown[]; [key: string]: unknown };
 function normalizeCoordinate(value: string | null) {
   if (!value) return null;
@@ -85,6 +93,97 @@ function normalizeAmapRoute(payload: unknown): NormalizedRoute | null {
   };
 }
 
+function shareRouteCacheKey(origin: string, destination: string) {
+  return `${AMAP_ROUTE_CACHE_PREFIX}${origin}|${destination}|policy=0|ferry=0|waypoints=`;
+}
+
+async function fetchShareRoute(env: Env, from: ShareStop, to: ShareStop) {
+  const webServiceKey = env.AMAP_WEB_SERVICE_KEY?.trim();
+  const origin = normalizeCoordinate(`${from.lng},${from.lat}`);
+  const destination = normalizeCoordinate(`${to.lng},${to.lat}`);
+  if (!webServiceKey || !origin || !destination) return null;
+
+  const cacheKey = shareRouteCacheKey(origin, destination);
+  if (env.ROADBOOK_KV) {
+    const cached = await env.ROADBOOK_KV.get(cacheKey, "json") as NormalizedRoute | null;
+    if (cached?.status === "1" && cached.route) return cached;
+  }
+
+  const routeUrl = new URL("https://restapi.amap.com/v5/direction/driving");
+  routeUrl.searchParams.set("key", webServiceKey);
+  routeUrl.searchParams.set("origin", origin);
+  routeUrl.searchParams.set("destination", destination);
+  routeUrl.searchParams.set("strategy", "0");
+  routeUrl.searchParams.set("ferry", "0");
+  routeUrl.searchParams.set("show_fields", "cost,navi,polyline");
+  routeUrl.searchParams.set("output", "json");
+
+  try {
+    const upstream = await fetch(routeUrl);
+    const payload = await upstream.json();
+    const normalized = normalizeAmapRoute(payload);
+    if (!upstream.ok || !normalized) return null;
+    if (env.ROADBOOK_KV) await env.ROADBOOK_KV.put(cacheKey, JSON.stringify(normalized), { expirationTtl: AMAP_ROUTE_CACHE_TTL });
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+async function mapShareWithConcurrency<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
+function shareRouteKey(stops: ShareStop[]) {
+  return stops.map((stop) => `${Number(stop.lng).toFixed(6)},${Number(stop.lat).toFixed(6)}`).join("|");
+}
+
+async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnapshot) {
+  if (!env.ROADBOOK_KV) return;
+  const snapshot = JSON.parse(JSON.stringify(initial)) as ShareSnapshot;
+  const missing = snapshot.roadbook.days.flatMap((day) => (day.stops ?? []).slice(0, -1).flatMap((from, index) => {
+    const to = day.stops?.[index + 1];
+    if (!from.id || !to || typeof from.lng !== "number" || typeof from.lat !== "number" || typeof to.lng !== "number" || typeof to.lat !== "number") return [];
+    const existing = snapshot.legs[from.id];
+    return typeof existing?.distance === "number" && typeof existing?.duration === "number" ? [] : [{ from, to }];
+  }));
+  if (!missing.length) return;
+
+  const results = await mapShareWithConcurrency(missing, 4, async ({ from, to }) => ({ id: from.id!, route: await fetchShareRoute(env, from, to) }));
+  const routeByStopId = new Map<string, NormalizedRoute>();
+  results.forEach(({ id, route }) => {
+    if (!route) return;
+    routeByStopId.set(id, route);
+    snapshot.legs[id] = {
+      distance: route.route.distance,
+      duration: route.route.duration,
+      ...(typeof route.route.tolls === "number" ? { tolls: route.route.tolls } : {}),
+    };
+  });
+  snapshot.roadbook.days.forEach((day) => {
+    const stops = day.stops ?? [];
+    const path = stops.slice(0, -1).flatMap((stop, index) => {
+      const route = routeByStopId.get(stop.id ?? "");
+      const points = route?.route.path ?? [];
+      return index === 0 ? points : points.slice(1);
+    });
+    if (path.length >= 2) {
+      snapshot.paths = { ...(snapshot.paths ?? {}), [shareRouteKey(stops)]: path.slice(0, 500) };
+    }
+  });
+  await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
+}
+
 function toBase64Url(bytes: Uint8Array) {
   let binary = "";
   bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
@@ -108,7 +207,7 @@ function getCookie(request: Request, name: string) {
   return cookieHeader.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
 }
 
-function isShareSnapshot(value: unknown): value is { version: 1; roadbook: { days: unknown[] }; legs: Record<string, unknown>; createdAt: string } {
+function isShareSnapshot(value: unknown): value is ShareSnapshot {
   if (!value || typeof value !== "object") return false;
   const snapshot = value as Record<string, unknown>;
   return snapshot.version === 1 && typeof snapshot.createdAt === "string" && Boolean(snapshot.roadbook && typeof snapshot.roadbook === "object" && Array.isArray((snapshot.roadbook as { days?: unknown }).days)) && Boolean(snapshot.legs && typeof snapshot.legs === "object");
@@ -175,6 +274,7 @@ const worker = {
       crypto.getRandomValues(tokenBytes);
       const token = toBase64Url(tokenBytes);
       await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
+      ctx.waitUntil(prepareShareSnapshot(env, token, snapshot));
       return Response.json({ ok: true, token }, { headers: { "Cache-Control": "no-store" } });
     }
 
@@ -201,7 +301,7 @@ const worker = {
       if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) return Response.json({ ok: false, error: "invalid_token" }, { status: 400 });
       const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`, "json");
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
-      return Response.json({ ok: true, snapshot }, { headers: { "Cache-Control": "public, max-age=60" } });
+      return Response.json({ ok: true, snapshot }, { headers: { "Cache-Control": "no-store" } });
     }
 
     if (url.pathname === "/api/roadbooks" && request.method === "GET") {
