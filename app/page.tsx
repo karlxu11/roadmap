@@ -1126,15 +1126,13 @@ export default function Home() {
       key: legCacheKey(stop, day.stops[index + 1]),
     })));
     const now = Date.now();
-    const missingLegs = allLegs.filter(({ day, stop, destination, key }) => {
+    const missingLegs = allLegs.filter(({ key }) => {
       const cached = routeCacheRef.current.legs[key];
-      const hasFullDayPath = routeCacheRef.current.paths[routeCacheKey(day.stops)]?.length >= 2;
-      const hasLegPath = cached?.path && cached.path.length >= 2;
-      return !isFreshCachedLeg(cached, now) || (!hasFullDayPath && !hasLegPath && Boolean(stop) && Boolean(destination));
+      return !isFreshCachedLeg(cached, now);
     });
     const entries = await mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({
       key,
-      metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, true),
+      metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current),
     }));
     entries.forEach(({ key, metric }) => {
       if (metric) {
@@ -1150,11 +1148,28 @@ export default function Home() {
     }
     const paths = buildSharePaths(roadbook);
     const incompleteLegs = allLegs.filter(({ key }) => !isFreshCachedLeg(routeCacheRef.current.legs[key]));
-    const incompletePaths = roadbook.days.filter((day) => day.stops.length >= 2).filter((day) => !paths[routeCacheKey(day.stops)]);
     return {
-      complete: incompleteLegs.length === 0 && incompletePaths.length === 0,
-      missingCount: incompleteLegs.length + incompletePaths.length,
+      complete: incompleteLegs.length === 0,
+      missingCount: incompleteLegs.length,
       paths,
+    };
+  }
+
+  function buildShareSnapshot(roadbook: Roadbook) {
+    const legs = Object.fromEntries(roadbook.days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => {
+      const metric = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
+      return isFreshCachedLeg(metric) ? [[stop.id, { distance: metric.distance, duration: metric.duration, tolls: typeof metric.tolls === "number" ? metric.tolls : undefined }]] : [];
+    })));
+    const missingCount = roadbook.days.reduce((count, day) => count + day.stops.slice(0, -1).filter((stop, index) => !isFreshCachedLeg(routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])])).length, 0);
+    return {
+      snapshot: {
+        version: 1 as const,
+        roadbook,
+        legs,
+        paths: buildSharePaths(roadbook),
+        createdAt: new Date().toISOString(),
+      } satisfies SharedSnapshot,
+      missingCount,
     };
   }
 
@@ -1171,22 +1186,9 @@ export default function Home() {
     if (isPreparingShare) return;
     setIsPreparingShare(true);
     try {
-      const prepared = await prepareShareData(activeRoadbook);
-      if (!prepared.complete) {
-        flash(`还有 ${prepared.missingCount} 个路线数据未准备好，暂时无法生成完整分享链接`);
-        return;
-      }
-      const legs = Object.fromEntries(activeRoadbook.days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => {
-        const metric = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
-        return [stop.id, { distance: metric.distance, duration: metric.duration, tolls: typeof metric.tolls === "number" ? metric.tolls : undefined }];
-      })));
-      const snapshot: SharedSnapshot = {
-        version: 1,
-        roadbook: activeRoadbook,
-        legs,
-        paths: prepared.paths,
-        createdAt: new Date().toISOString(),
-      };
+      // 分享不再等待整本路书补算完成；先生成当前缓存快照，缺失路段后台继续预热。
+      const { snapshot, missingCount } = buildShareSnapshot(activeRoadbook);
+      void prepareShareData(activeRoadbook).catch(() => undefined);
       let shareUrl = "";
       try {
         const response = await fetch("/api/shares", {
@@ -1216,7 +1218,7 @@ export default function Home() {
       }
       try {
         await navigator.clipboard.writeText(shareUrl);
-        flash("分享链接已复制，可直接粘贴发送");
+        flash(missingCount ? `分享链接已复制，还有 ${missingCount} 条路线暂未记录` : "分享链接已复制，可直接粘贴发送");
       } catch {
         flash("复制失败，请检查浏览器剪贴板权限");
       }
