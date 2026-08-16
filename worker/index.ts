@@ -358,6 +358,7 @@ const worker = {
       await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: SHARE_LINK_TTL });
       const index = await readShareIndex(env);
       await writeShareIndex(env, index.map((link) => link.token === token ? { ...link, roadbookId: snapshot.roadbook.id ?? link.roadbookId, roadbookTitle: snapshot.roadbook.title ?? link.roadbookTitle } : link));
+      ctx.waitUntil(prepareShareSnapshot(env, token, snapshot).catch(() => undefined));
       return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     }
 

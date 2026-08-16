@@ -1342,14 +1342,26 @@ export default function Home() {
     flash(`已把「${result.name}」加入第 ${days.findIndex((day) => day.id === selectedDayId) + 1} 天`);
   }
 
-  async function commitRoadbooks(next: Roadbook[], successMessage: string) {
+  async function commitRoadbooks(next: Roadbook[], successMessage: string, afterRemoteSave?: () => Promise<string | null>) {
     setRoadbooks(next);
     saveRoadbooks(next);
     setStorageStatus("saving");
     try {
       const saved = await saveRemoteRoadbooks(next);
       setStorageStatus(saved ? "remote" : "unavailable");
-      flash(saved ? successMessage : "云端保存失败，暂时保存在当前设备");
+      if (!saved) {
+        flash("云端保存失败，暂时保存在当前设备");
+        return;
+      }
+      let message = successMessage;
+      if (afterRemoteSave) {
+        try {
+          message = await afterRemoteSave() ?? message;
+        } catch {
+          message = "路书已保存，但分享链接同步失败";
+        }
+      }
+      flash(message);
     } catch {
       setStorageStatus("unavailable");
       flash("云端保存失败，暂时保存在当前设备");
@@ -1359,7 +1371,8 @@ export default function Home() {
   function saveTrip() {
     if (readOnly) return;
     const next = roadbooks.map((roadbook) => roadbook.id === activeRoadbookId ? { ...roadbook, updated: "刚刚保存" } : roadbook);
-    void commitRoadbooks(next, "路书已保存到云端");
+    const updatedRoadbook = next.find((roadbook) => roadbook.id === activeRoadbookId);
+    void commitRoadbooks(next, "路书已保存到云端", updatedRoadbook ? () => syncCloudShareSnapshots(updatedRoadbook) : undefined);
   }
 
   function openRoadbook(id: string) {
@@ -1447,6 +1460,37 @@ export default function Home() {
       } satisfies SharedSnapshot,
       missingCount,
     };
+  }
+
+  async function syncCloudShareSnapshots(roadbook: Roadbook) {
+    const listResponse = await fetch("/api/shares", { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!listResponse.ok) return null;
+    const payload = await listResponse.json() as { links?: Array<{ token?: string; roadbookId?: string; expiresAt?: string }> };
+    const now = Date.now();
+    const links = (payload.links ?? []).filter((link): link is { token: string; roadbookId?: string; expiresAt?: string } => Boolean(
+      link.token
+      && link.roadbookId === roadbook.id
+      && (!link.expiresAt || new Date(link.expiresAt).getTime() > now),
+    ));
+    if (!links.length) return null;
+
+    const snapshot = buildShareSnapshot(roadbook).snapshot;
+    const results = await mapWithConcurrency(links, ROUTE_REQUEST_CONCURRENCY, async (link) => {
+      try {
+        const response = await fetch(`/api/shares?token=${encodeURIComponent(link.token)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(snapshot),
+          cache: "no-store",
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    });
+    const updatedCount = results.filter(Boolean).length;
+    if (updatedCount !== links.length) return `路书已保存，${links.length - updatedCount} 个分享链接同步失败`;
+    return `路书已保存，并同步 ${updatedCount} 个分享链接`;
   }
 
   async function shareRoadbook() {
@@ -1554,7 +1598,7 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          {readOnly ? <div className="share-mode-label"><span>只读分享</span><small>路径 · 费用 · 时间已记录</small></div> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
+          {readOnly ? <div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
         </div>
       </header>
 
@@ -1599,7 +1643,7 @@ export default function Home() {
           <div className="editor-head">
             <div>
               <div className="crumb">{starterTrip.title} <span>/</span> 第 {days.findIndex((day) => day.id === selectedDayId) + 1} 天</div>
-              <div className="title-row"><input readOnly={readOnly} aria-label="编辑当天标题" value={selectedDay.title} onChange={(event) => updateSelectedDay((day) => ({ ...day, title: event.target.value }))} /><span className="edit-hint">{readOnly ? "只读" : "↗"}</span></div>
+              <div className="title-row"><input readOnly={readOnly} aria-label="编辑当天标题" value={selectedDay.title} onChange={(event) => updateSelectedDay((day) => ({ ...day, title: event.target.value }))} />{!readOnly && <span className="edit-hint">↗</span>}</div>
               <input className="subtitle-input" readOnly={readOnly} aria-label="编辑当天副标题" value={selectedDay.subtitle} onChange={(event) => updateSelectedDay((day) => ({ ...day, subtitle: event.target.value }))} />
             </div>
             <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
@@ -1608,7 +1652,7 @@ export default function Home() {
           <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div><span className="stat-label">当日路段</span><strong>{Math.max(selectedDay.stops.length - 1, 0)} 段</strong></div><div className="route-state"><span className={mapReady ? "live-dot" : ""} /> {readOnly ? (mapReady ? "高德地图已接入" : "正在加载高德地图") : mapReady ? "高德路线已接入" : "示例路线预览"}</div></div>
 
           <div className="stops-section">
-            <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "这是一个只读分享快照，路径、费用和时间已固定" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
+            <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "路径、费用和时间以分享时记录为准" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
             <div className="timeline">
               {selectedDay.stops.map((stop, index) => {
                 const destination = selectedDay.stops[index + 1];
