@@ -554,6 +554,11 @@ function formatDistance(meters?: number) {
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} 公里` : `${Math.round(meters)} 米`;
 }
 
+function formatKilometers(meters?: number) {
+  if (typeof meters !== "number" || !Number.isFinite(meters)) return "待计算";
+  return `${(meters / 1000).toFixed(1)} 公里`;
+}
+
 function formatSearchResultMeta(result: SearchResult) {
   const parts = [result.address, result.type];
   if (typeof result.distance === "number" && Number.isFinite(result.distance)) {
@@ -655,6 +660,34 @@ export default function Home() {
     if (!sharedSnapshot) return legMetrics;
     return Object.fromEntries(Object.entries(sharedSnapshot.legs).map(([stopId, metric]) => [stopId, { status: "ready" as const, ...metric }])) as typeof legMetrics;
   }, [legMetrics, sharedSnapshot]);
+  const dayDistanceSummaries = useMemo(() => {
+    const now = Date.now();
+    const cacheRevision = routeCacheVersion;
+    return days.map((day) => {
+      const metrics = day.stops.slice(0, -1).map((stop, index) => {
+        const displayed = displayLegMetrics[stop.id];
+        if (displayed?.status === "ready" && typeof displayed.distance === "number") return displayed;
+        if (sharedSnapshot) return undefined;
+        const cached = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
+        return isFreshCachedLeg(cached, now) ? cached : undefined;
+      });
+      const complete = metrics.every((metric) => metric && typeof metric.distance === "number");
+      return {
+        dayId: day.id,
+        complete,
+        distance: complete ? metrics.reduce((sum, metric) => sum + (metric?.distance ?? 0), 0) : undefined,
+        cacheRevision,
+      };
+    });
+  }, [days, displayLegMetrics, routeCacheVersion, sharedSnapshot]);
+  const dayDistanceById = useMemo(() => Object.fromEntries(dayDistanceSummaries.map((summary) => [summary.dayId, summary])), [dayDistanceSummaries]);
+  const roadbookDistanceSummary = useMemo(() => {
+    const complete = dayDistanceSummaries.every((summary) => summary.complete);
+    return {
+      complete,
+      distance: complete ? dayDistanceSummaries.reduce((sum, summary) => sum + (summary.distance ?? 0), 0) : undefined,
+    };
+  }, [dayDistanceSummaries]);
   const routeSummary = useMemo(() => {
     const legs = selectedDay.stops.slice(0, -1).map((stop) => displayLegMetrics[stop.id]).filter((metric) => metric?.status === "ready");
     const expectedLegs = Math.max(selectedDay.stops.length - 1, 0);
@@ -914,13 +947,12 @@ export default function Home() {
     setLegMetrics(initialMetrics);
 
     const allLegs = days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => ({
-      dayId: day.id,
       stop,
       destination: day.stops[index + 1],
       key: legCacheKey(stop, day.stops[index + 1]),
     })));
-    // 默认只计算当前天；打开累计高速费弹窗后，才补算截至当前天的其它天数。
-    const targetLegs = showCumulativeTolls ? allLegs.filter(({ dayId }) => days.findIndex((day) => day.id === dayId) <= selectedDayIndex) : allLegs.filter(({ dayId }) => dayId === selectedDay.id);
+    // 左栏需要每日和全程里程，因此会补齐所有路段。每段优先读取 Worker KV 的 24 小时缓存。
+    const targetLegs = allLegs;
     const missingLegs = targetLegs.filter(({ key }) => {
       const cached = routeCacheRef.current.legs[key];
       return !isFreshCachedLeg(cached, now) && (routeCacheRef.current.errors[key] ?? 0) <= now;
@@ -943,7 +975,7 @@ export default function Home() {
     return () => { cancelled = true; };
   // 路线计算只依赖路线指纹；标题、备注和出发时间变化不应重新触发高德请求。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, readOnly, routePlanDependencyKey, selectedDayIndex, selectedDayRouteDependencyKey, showCumulativeTolls, storageStatus]);
+  }, [amapLoaded, readOnly, routePlanDependencyKey, selectedDayRouteDependencyKey, storageStatus]);
 
   function updateEditorWidth(clientX: number) {
     const workspace = workspaceRef.current;
@@ -1535,13 +1567,19 @@ export default function Home() {
             <div className="trip-meta"><span>⌖ {starterTrip.region} · {days.length} 天</span><span>◇ {totalStops} 个地点</span></div>
           </div>
 
+          <div className={`roadbook-distance-summary ${roadbookDistanceSummary.complete ? "ready" : "pending"}`} aria-live="polite">
+            <span>全程总里程</span>
+            <strong>{roadbookDistanceSummary.complete ? formatKilometers(roadbookDistanceSummary.distance) : readOnly ? "未完整记录" : amapLoaded ? "计算中…" : "待连接高德"}</strong>
+          </div>
           <div className="day-list-header"><span>行程安排</span><span className="day-count">{days.length} DAYS</span></div>
           <div className="day-list">
-            {days.map((day, index) => (
-              <div className="day-wrap" key={day.id}>
+            {days.map((day, index) => {
+              const distanceSummary = dayDistanceById[day.id];
+              const distanceLabel = distanceSummary?.complete ? formatKilometers(distanceSummary.distance) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待计算";
+              return <div className="day-wrap" key={day.id}>
                 <button className={`day-card ${selectedDayId === day.id ? "selected" : ""}`} type="button" onClick={() => setSelectedDayId(day.id)}>
                   <span className="day-number">{String(index + 1).padStart(2, "0")}</span>
-                  <span className="day-copy"><strong>{day.title}</strong><small>{day.date} · {day.stops.length} 个地点</small></span>
+                  <span className="day-copy"><strong>{day.title}</strong><span className="day-meta-row"><small>{day.date} · {day.stops.length} 个地点</small><small className={`day-distance ${distanceSummary?.complete ? "ready" : ""}`}>{distanceLabel}</small></span></span>
                   <span className="day-arrow">{selectedDayId === day.id ? "↗" : "→"}</span>
                 </button>
                 {!readOnly && <><div className="day-hover-actions">
@@ -1550,8 +1588,8 @@ export default function Home() {
                   <button type="button" onClick={() => removeDay(day.id)} aria-label="删除这一天">×</button>
                 </div>
                 {index < days.length - 1 && <button className="insert-line" type="button" onClick={() => insertDay(day.id)}><span>＋</span> 在这里插入一天</button>}</>}
-              </div>
-            ))}
+              </div>;
+            })}
           </div>
 
           {!readOnly && <button className="add-day-button" type="button" onClick={() => insertDay(days.at(-1)?.id)}><span>＋</span> 在行程末尾添加一天</button>}

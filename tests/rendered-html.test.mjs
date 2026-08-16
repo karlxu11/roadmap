@@ -26,6 +26,8 @@ test("server-renders the roadbook workspace", async () => {
   assert.match(html, /把想去的地方放进来/);
   assert.match(html, /type="time"/);
   assert.match(html, /总时长/);
+  assert.match(html, /全程总里程/);
+  assert.match(html, /待计算/);
   assert.match(html, /我的路书/);
   assert.match(html, /分享管理/);
   assert.match(html, /新路书/);
@@ -84,6 +86,27 @@ test("stores share snapshots behind a short token", async () => {
   assert.equal(revokeResponse.status, 200);
   const revokedReadResponse = await worker.fetch(new Request(`http://localhost/api/shares?token=${token}`), { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv }, { waitUntil() {}, passThroughOnException() {} });
   assert.equal(revokedReadResponse.status, 404);
+});
+
+test("serves sidebar route metrics from the Worker KV cache", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("route-cache", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const cachedRoute = { status: "1", info: "OK", route: { distance: 128400, duration: 7200, tolls: 54, path: [] } };
+  const cacheKey = "amap-route-v1:114.000000,22.000000|106.500000,29.500000|policy=0|ferry=0|waypoints=";
+  const kv = {
+    async get(key) { return key === cacheKey ? cachedRoute : null; },
+    async put() {},
+    async delete() {},
+  };
+  const response = await worker.fetch(
+    new Request("http://localhost/api/amap/route?origin=114,22&destination=106.5,29.5&policy=0"),
+    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv, AMAP_WEB_SERVICE_KEY: "test-key" },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-route-cache"), "HIT");
+  assert.deepEqual(await response.json(), cachedRoute);
 });
 
 test("share pages bypass the editor password", async () => {

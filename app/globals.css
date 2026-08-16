@@ -380,13 +380,29 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .sidebar-intro p { color: #737e90; font-size: 12px; line-height: 1.6; }
 .trip-meta { gap: 9px; margin-top: 17px; flex-wrap: wrap; color: #687386; font-size: 11px; }
 .trip-meta span { padding: 6px 8px; border-radius: 7px; background: #ebeff4; }
+.roadbook-distance-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 10px 14px;
+  padding: 11px 12px;
+  border: 1px solid #dce5e1;
+  border-radius: 11px;
+  background: #f2f8f6;
+  color: #6f7b8b;
+  font-size: 11px;
+}
+.roadbook-distance-summary strong { color: var(--green); font-size: 14px; white-space: nowrap; }
+.roadbook-distance-summary.pending { border-color: #e2e7ed; background: #f8fafc; }
+.roadbook-distance-summary.pending strong { color: #929cab; font-size: 11px; }
 .day-list-header { padding: 0 10px 10px; color: #3f4a5d; font-size: 12px; }
 .day-count { color: #9aa4b3; font-size: 10px; }
 .day-list { padding: 2px; }
-.day-wrap { margin-bottom: 5px; }
+.day-wrap { margin-bottom: 1px; }
 .day-card {
-  min-height: 72px;
-  padding: 13px 12px;
+  min-height: 62px;
+  padding: 9px 10px;
   gap: 11px;
   border-color: transparent;
   border-radius: 13px;
@@ -412,15 +428,20 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   font-weight: 800;
 }
 .selected .day-number { background: var(--blue); color: #fff; box-shadow: 0 6px 14px rgba(53, 89, 217, .22); }
-.day-copy { gap: 5px; min-width: 0; }
+.day-copy { gap: 4px; min-width: 0; }
 .day-copy strong { overflow: hidden; color: #263248; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .day-copy small { color: #8791a0; font-size: 11px; }
+.day-meta-row { display: flex; align-items: center; justify-content: space-between; gap: 7px; min-width: 0; }
+.day-meta-row > small:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.day-distance { flex-shrink: 0; color: #a0a8b4 !important; font-size: 10px !important; font-weight: 700; }
+.day-distance.ready { color: var(--green) !important; }
 .day-arrow { color: #adb5c1; font-size: 16px; }
 .selected .day-arrow { color: var(--blue); }
-.day-hover-actions { top: 14px; right: 35px; }
+.day-hover-actions { top: 10px; right: 33px; }
 .day-hover-actions button, .stop-tools button { border: 1px solid #e1e6ed; background: #fff; color: #7c8798; }
 .day-hover-actions button:hover, .stop-tools button:hover { border-color: #f1c1b1; background: var(--warm); color: var(--orange); }
-.insert-line { height: 28px; color: #8490a1; }
+.insert-line { height: 16px; color: #8490a1; font-size: 9px; }
+.insert-line span { font-size: 12px; }
 .add-day-button {
   margin: 12px 10px 0;
   padding: 11px;
@@ -624,10 +645,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .sidebar-intro { padding: 1px 5px 16px; }
   .sidebar h1 { font-size: 22px; }
   .trip-meta { margin-top: 13px; }
+  .roadbook-distance-summary { margin: 0 5px 13px; }
   .day-list-header { padding-left: 5px; }
   .day-list { gap: 8px; scroll-snap-type: x proximity; }
   .day-wrap { min-width: 210px; scroll-snap-align: start; }
-  .day-card { min-height: 68px; background: #fff; }
+  .day-card { min-height: 64px; background: #fff; }
   .editor-pane { padding: 25px 16px 90px; }
   .editor-head { display: block; }
   .title-row input { font-size: 28px; }
