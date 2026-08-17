@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { initialDays as importedDays } from "./roadbook-data";
+import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
 
 type StopKind = "出发" | "途经" | "住宿" | "景点";
 
@@ -128,18 +129,6 @@ function legCacheKey(from: Stop, to: Stop) {
   return `${from.lng.toFixed(6)},${from.lat.toFixed(6)}>${to.lng.toFixed(6)},${to.lat.toFixed(6)}|policy:0`;
 }
 
-function normalizeRoutePath(value: unknown) {
-  if (!Array.isArray(value)) return [];
-  return value.filter((point): point is [number, number] => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]));
-}
-
-function combineRoutePaths(paths: Array<Array<[number, number]> | undefined>) {
-  return paths.reduce<Array<[number, number]>>((combined, path) => {
-    if (!path?.length) return combined;
-    return [...combined, ...(combined.length ? path.slice(1) : path)];
-  }, []);
-}
-
 async function mapWithConcurrency<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>) {
   const results = new Array<R>(items.length);
   let nextIndex = 0;
@@ -208,13 +197,14 @@ function saveRouteCache(cache: RouteCache) {
   }
 }
 
-function isFreshCachedLeg(leg: CachedLeg | undefined, now = Date.now()) {
+function isFreshCachedLeg(leg: CachedLeg | undefined, now = Date.now(), requirePath = false) {
   return Boolean(
     leg
     && Number.isFinite(leg.cachedAt)
     && now - leg.cachedAt < ROUTE_CACHE_TTL
     && Number.isFinite(leg.distance)
-    && Number.isFinite(leg.duration),
+    && Number.isFinite(leg.duration)
+    && (!requirePath || hasDrawableRoutePath(leg.path)),
   );
 }
 
@@ -279,9 +269,10 @@ async function fetchRouteLeg(stop: Stop, destination: Stop, includePath: boolean
     // Worker 上游高德返回 5xx/限流时，回退到已经加载的 JS API，避免整段路线被判失败。
     if (!response.ok) return response.status === 404 || response.status === 429 || response.status >= 500 ? requestWithJsApi() : null;
     const payload = await response.json() as RouteApiPayload;
-    return payload.status === "1" && payload.route && typeof payload.route.distance === "number" && typeof payload.route.duration === "number"
-      ? { distance: payload.route.distance, duration: payload.route.duration, tolls: typeof payload.route.tolls === "number" ? payload.route.tolls : null, path: payload.route.path, cachedAt: Date.now() }
-      : null;
+    if (payload.status !== "1" || !payload.route || typeof payload.route.distance !== "number" || typeof payload.route.duration !== "number") return null;
+    const metric = { distance: payload.route.distance, duration: payload.route.duration, tolls: typeof payload.route.tolls === "number" ? payload.route.tolls : null, path: normalizeRoutePath(payload.route.path), cachedAt: Date.now() };
+    if (includePath && !hasDrawableRoutePath(metric.path)) return requestWithJsApi();
+    return metric;
   } catch {
     return null;
   } finally {
@@ -912,14 +903,14 @@ export default function Home() {
       }));
       map.setFitView(markersRef.current);
       if (selectedDay.stops.length >= 2) {
-        const cachedPath = sharedPath.length >= 2
-          ? sharedPath
-          : routeCacheRef.current.paths[routeKey] ?? combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path));
+        const combinedPath = combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path));
+        const cachedPath = sharedPath.length >= 2 ? sharedPath : combinedPath;
+        if (!readOnly) {
+          if (combinedPath.length >= 2) routeCacheRef.current.paths[routeKey] = combinedPath;
+          else delete routeCacheRef.current.paths[routeKey];
+          saveRouteCache(routeCacheRef.current);
+        }
         if (cachedPath?.length) {
-          if (!routeCacheRef.current.paths[routeKey]) {
-            routeCacheRef.current.paths[routeKey] = cachedPath;
-            saveRouteCache(routeCacheRef.current);
-          }
           routeLineRef.current = new AMap.Polyline({ path: cachedPath, strokeColor: "#dc6b3f", strokeWeight: 5, strokeOpacity: 0.82, lineJoin: "round" });
           routeLineRef.current.setMap(map);
           map.setFitView([...markersRef.current, routeLineRef.current]);
@@ -958,14 +949,15 @@ export default function Home() {
       stop,
       destination: day.stops[index + 1],
       key: legCacheKey(stop, day.stops[index + 1]),
+      isSelectedDay: day.id === selectedDay.id,
     })));
     // 左栏需要每日和全程里程，因此会补齐所有路段。每段优先读取 Worker KV 的 24 小时缓存。
     const targetLegs = allLegs;
-    const missingLegs = targetLegs.filter(({ key }) => {
+    const missingLegs = targetLegs.filter(({ key, isSelectedDay }) => {
       const cached = routeCacheRef.current.legs[key];
-      return !isFreshCachedLeg(cached, now) && (routeCacheRef.current.errors[key] ?? 0) <= now;
+      return !isFreshCachedLeg(cached, now, isSelectedDay) && (routeCacheRef.current.errors[key] ?? 0) <= now;
     });
-    void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({ stopId: stop.id, key, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current) })).then((entries) => {
+    void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key, isSelectedDay }) => ({ stopId: stop.id, key, isSelectedDay, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, isSelectedDay) })).then((entries) => {
       entries.forEach(({ key, metric }) => {
         if (metric) {
           routeCacheRef.current.legs[key] = metric;
@@ -978,7 +970,10 @@ export default function Home() {
         saveRouteCache(routeCacheRef.current);
         setRouteCacheVersion((version) => version + 1);
       }
-      if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.map(({ stopId, metric }) => [stopId, metric ? { status: "ready" as const, ...displayCachedLeg(metric) } : { status: "error" as const }])) }));
+      if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.filter(({ isSelectedDay }) => isSelectedDay).map(({ stopId, key }) => {
+        const cached = routeCacheRef.current.legs[key];
+        return [stopId, isFreshCachedLeg(cached) ? { status: "ready" as const, ...displayCachedLeg(cached) } : { status: "error" as const }];
+      })) }));
     });
     return () => { cancelled = true; };
   // 路线计算只依赖路线指纹；标题、备注和出发时间变化不应重新触发高德请求。
@@ -1408,8 +1403,8 @@ export default function Home() {
   function buildSharePaths(roadbook: Roadbook) {
     return Object.fromEntries(roadbook.days.flatMap((day) => {
       if (day.stops.length < 2) return [];
+      const path = combineRoutePaths(day.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])]?.path));
       const key = routeCacheKey(day.stops);
-      const path = routeCacheRef.current.paths[key] ?? combineRoutePaths(day.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])]?.path));
       const fallbackPath = day.stops.map((stop) => [stop.lng, stop.lat] as [number, number]);
       return [[key, sampleRoutePath(path.length >= 2 ? path : fallbackPath)]];
     }));
@@ -1425,11 +1420,11 @@ export default function Home() {
     const now = Date.now();
     const missingLegs = allLegs.filter(({ key }) => {
       const cached = routeCacheRef.current.legs[key];
-      return !isFreshCachedLeg(cached, now);
+      return !isFreshCachedLeg(cached, now, true);
     });
     const entries = await mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({
       key,
-      metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current),
+      metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, true),
     }));
     entries.forEach(({ key, metric }) => {
       if (metric) {
@@ -1444,7 +1439,7 @@ export default function Home() {
       setRouteCacheVersion((version) => version + 1);
     }
     const paths = buildSharePaths(roadbook);
-    const incompleteLegs = allLegs.filter(({ key }) => !isFreshCachedLeg(routeCacheRef.current.legs[key]));
+    const incompleteLegs = allLegs.filter(({ key }) => !isFreshCachedLeg(routeCacheRef.current.legs[key], Date.now(), true));
     return {
       complete: incompleteLegs.length === 0,
       missingCount: incompleteLegs.length,
