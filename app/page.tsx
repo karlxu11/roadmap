@@ -688,6 +688,14 @@ export default function Home() {
       distance: complete ? dayDistanceSummaries.reduce((sum, summary) => sum + (summary.distance ?? 0), 0) : undefined,
     };
   }, [dayDistanceSummaries]);
+  const cumulativeDistanceSummary = useMemo(() => {
+    const summaries = dayDistanceSummaries.slice(0, selectedDayIndex + 1);
+    const complete = summaries.every((summary) => summary.complete);
+    return {
+      complete,
+      distance: complete ? summaries.reduce((sum, summary) => sum + (summary.distance ?? 0), 0) : undefined,
+    };
+  }, [dayDistanceSummaries, selectedDayIndex]);
   const routeSummary = useMemo(() => {
     const legs = selectedDay.stops.slice(0, -1).map((stop) => displayLegMetrics[stop.id]).filter((metric) => metric?.status === "ready");
     const expectedLegs = Math.max(selectedDay.stops.length - 1, 0);
@@ -1582,6 +1590,7 @@ export default function Home() {
   const sharedRoutePath = useMemo(() => readOnly ? sharedSnapshot?.paths?.[routeCacheKey(mapStops)] ?? [] : [], [mapStops, readOnly, sharedSnapshot]);
   const sharedMapProjection = useMemo(() => projectRoutePath(sharedRoutePath, mapStops), [mapStops, sharedRoutePath]);
   const storageStatusLabel = storageStatus === "remote" ? "已同步到云端" : storageStatus === "saving" ? "正在保存到云端" : storageStatus === "loading" ? "正在连接云端" : "云端存储未配置";
+  const routeConnectionLabel = readOnly ? (mapReady ? "高德地图已接入" : "正在加载高德地图") : mapReady ? "高德路线已接入" : "示例路线预览";
 
   if (shareLoadError) {
     return <main className="share-error-page"><div className="share-error-card"><div className="brand-mark" aria-hidden="true">路</div><div className="eyebrow">SHARE LINK UNAVAILABLE</div><h1>分享链接无效</h1><p>链接可能被截短、已过期，或已经被创建者撤销。请向分享者重新获取完整链接。</p><Link className="primary-button" href="/">返回首页 <span>→</span></Link></div></main>;
@@ -1598,7 +1607,7 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          {readOnly ? <div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
+          {readOnly ? <><div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><div className="top-system-status"><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></div><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
         </div>
       </header>
 
@@ -1649,7 +1658,7 @@ export default function Home() {
             <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
-          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div><span className="stat-label">当日路段</span><strong>{Math.max(selectedDay.stops.length - 1, 0)} 段</strong></div><div className="route-state"><span className={mapReady ? "live-dot" : ""} /> {readOnly ? (mapReady ? "高德地图已接入" : "正在加载高德地图") : mapReady ? "高德路线已接入" : "示例路线预览"}</div></div>
+          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
 
           <div className="stops-section">
             <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "路径、费用和时间以分享时记录为准" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
