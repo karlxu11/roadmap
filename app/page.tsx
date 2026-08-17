@@ -109,6 +109,7 @@ const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
 const ROUTE_FAILURE_RETRY_TTL = 5 * 60 * 1000;
 const ROUTE_REQUEST_CONCURRENCY = 4;
 const ROUTE_CACHE_PATH_MAX_POINTS = 240;
+const DEFAULT_EDITOR_WIDTH = 67;
 const SEARCH_CACHE_TTL = 10 * 60 * 1000;
 const SHARE_QUERY_KEY = "share";
 const SHARE_LINKS_KEY = "roadbook-share-links-v1";
@@ -626,7 +627,7 @@ export default function Home() {
   const [activeServiceAreaLeg, setActiveServiceAreaLeg] = useState<string | null>(null);
   const [routeCacheVersion, setRouteCacheVersion] = useState(0);
   const [settings, setSettings] = useState({ jsKey: "", securityCode: "", webKey: "" });
-  const [editorWidth, setEditorWidth] = useState(52);
+  const [editorWidth, setEditorWidth] = useState(DEFAULT_EDITOR_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);

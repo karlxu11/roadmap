@@ -37,6 +37,8 @@ test("server-renders the roadbook workspace", async () => {
   assert.match(html, /导出 PDF/);
   assert.match(html, /路书 · ROAM NOTE \| 由高德路线数据辅助整理/);
   assert.match(html, /接入高德地图，查看真实路线/);
+  assert.match(html, /--editor-track:67fr/);
+  assert.match(html, /--map-track:33fr/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
