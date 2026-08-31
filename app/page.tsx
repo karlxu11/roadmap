@@ -33,6 +33,7 @@ type Roadbook = {
   description: string;
   region: string;
   updated: string;
+  startDate?: string;
   days: DayPlan[];
 };
 
@@ -385,6 +386,7 @@ function defaultRoadbook(): Roadbook {
     description: "从深圳出发，穿越河西走廊，游览赛里木湖、库尔德宁与那拉提草原后返程",
     region: "深圳 → 伊犁 → 深圳",
     updated: "已从高德路书导入",
+    startDate: "2026-04-29",
     days: initialDays,
   };
 }
@@ -392,6 +394,26 @@ function defaultRoadbook(): Roadbook {
 function parseMonthDay(value: string) {
   const match = value.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
   return match ? { month: Number(match[1]), day: Number(match[2]) } : null;
+}
+
+function parseCalendarDate(value?: string) {
+  const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const [year, month, day] = match.slice(1).map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
+}
+
+function formatCalendarDate(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function getRoadbookStartDate(roadbook: Roadbook) {
+  const configured = parseCalendarDate(roadbook.startDate);
+  if (configured) return configured;
+  const first = parseMonthDay(roadbook.days[0]?.date ?? "");
+  const titleYear = Number(roadbook.title.match(/20\d{2}/)?.[0] ?? new Date().getFullYear());
+  return first ? new Date(titleYear, first.month - 1, first.day) : new Date();
 }
 
 function normalizeSearchLocation(location?: SearchLocation | string) {
@@ -431,7 +453,18 @@ function normalizeDayDates(days: DayPlan[]) {
 }
 
 function normalizeRoadbookDates(roadbooks: Roadbook[]) {
-  return roadbooks.map((roadbook) => ({ ...roadbook, days: normalizeDayDates(roadbook.days) }));
+  return roadbooks.map((roadbook) => {
+    const startDate = getRoadbookStartDate(roadbook);
+    return {
+      ...roadbook,
+      startDate: formatCalendarDate(startDate),
+      days: roadbook.days.map((day, index) => {
+        const date = new Date(startDate);
+        date.setDate(startDate.getDate() + index);
+        return { ...day, date: formatMonthDay(date) };
+      }),
+    };
+  });
 }
 
 function ensureImportedRoadbook(roadbooks: Roadbook[]) {
@@ -506,9 +539,10 @@ async function saveRemoteRoadbooks(roadbooks: Roadbook[]) {
 }
 
 function makeNewRoadbook(title: string, description: string): Roadbook {
+  const startDate = new Date();
   const firstDay: DayPlan = {
     id: uid("day"),
-    date: formatMonthDay(new Date()),
+    date: formatMonthDay(startDate),
     title: "新的第一天",
     subtitle: "先把想去的地方放进来",
     stops: [{ id: uid("stop"), name: "添加出发点", area: "点击“添加地点”搜索", kind: "出发", lat: 30.657, lng: 104.066, duration: "待安排" }],
@@ -519,6 +553,7 @@ function makeNewRoadbook(title: string, description: string): Roadbook {
     description: description.trim() || "一段新的旅程",
     region: "自定义行程",
     updated: "刚刚创建",
+    startDate: formatCalendarDate(startDate),
     days: [firstDay],
   };
 }
@@ -791,9 +826,7 @@ export default function Home() {
     });
     return arrivalTimes;
   }, [departureTime, displayLegMetrics, selectedDay.stops]);
-  const selectedDayDate = parseMonthDay(selectedDay.date);
-  const roadbookYear = starterTrip.title.match(/20\d{2}/)?.[0] ?? String(new Date().getFullYear());
-  const selectedDayDateValue = selectedDayDate ? `${roadbookYear}-${String(selectedDayDate.month).padStart(2, "0")}-${String(selectedDayDate.day).padStart(2, "0")}` : "";
+  const tripStartDateValue = formatCalendarDate(getRoadbookStartDate(starterTrip));
 
   useEffect(() => {
     let cancelled = false;
@@ -1204,12 +1237,21 @@ export default function Home() {
     updateStop(stopId, (stop) => ({ ...stop, duration: `${time} 出发` }));
   }
 
-  function updateSelectedDayDate(value: string) {
-    const [year, month, day] = value.split("-").map(Number);
-    if (![year, month, day].every(Number.isFinite)) return;
-    const start = new Date(year, month - 1, day);
-    if (start.getFullYear() !== year || start.getMonth() !== month - 1 || start.getDate() !== day) return;
-    updateSelectedDay((current) => ({ ...current, date: formatMonthDay(start) }));
+  function updateRoadbookStartDate(value: string) {
+    const startDate = parseCalendarDate(value);
+    if (!startDate || readOnly) return;
+    setRoadbooks((current) => current.map((roadbook) => {
+      if (roadbook.id !== activeRoadbookId) return roadbook;
+      return {
+        ...roadbook,
+        startDate: formatCalendarDate(startDate),
+        days: roadbook.days.map((day, index) => {
+          const date = new Date(startDate);
+          date.setDate(startDate.getDate() + index);
+          return { ...day, date: formatMonthDay(date) };
+        }),
+      };
+    }));
   }
 
   function insertDay(afterId = selectedDayId) {
@@ -1775,7 +1817,7 @@ export default function Home() {
             <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
-          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
+          <div className="stats-strip"><div className="date-stat"><span className="stat-label">行程出发日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={tripStartDateValue} aria-label="修改行程出发日期" onInput={(event) => updateRoadbookStartDate(event.currentTarget.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中…" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
 
           <div className="stops-section">
             <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "路径、费用和时间以分享时记录为准" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
