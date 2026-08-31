@@ -25,7 +25,7 @@ test("server-renders the roadbook workspace", async () => {
   assert.match(html, /在行程末尾添加一天/);
   assert.match(html, /把想去的地方放进来/);
   assert.match(html, /type="time"/);
-  assert.match(html, /行程出发日期/);
+  assert.match(html, /当日日期/);
   assert.match(html, /value="2026-04-29"/);
   assert.match(html, /总时长/);
   assert.match(html, /全程总里程/);
