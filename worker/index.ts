@@ -34,6 +34,7 @@ const SHARE_INDEX_KEY = "roadbook-shares:index";
 const SHARE_LINK_TTL = 60 * 60 * 24 * 30;
 const AMAP_ROUTE_CACHE_TTL = 60 * 60 * 24;
 const AMAP_ROUTE_CACHE_PREFIX = "amap-route-v1:";
+const AMAP_ROUTE_MAX_POINTS = 480;
 const AMAP_SEARCH_CACHE_TTL = 60 * 10;
 const AMAP_SEARCH_CACHE_PREFIX = "amap-search-v2:";
 const AMAP_SERVICE_AREA_CACHE_TTL = 60 * 60 * 6;
@@ -80,6 +81,22 @@ function parsePolyline(value: unknown) {
   });
 }
 
+function samplePolyline(path: Array<[number, number]>, maxPoints = AMAP_ROUTE_MAX_POINTS) {
+  if (path.length <= maxPoints) return path;
+  const step = Math.max(1, Math.ceil((path.length - 1) / (maxPoints - 1)));
+  return path.filter((_, index) => index % step === 0 || index === path.length - 1);
+}
+
+function routePayload(normalized: NormalizedRoute, includePath: boolean): NormalizedRoute {
+  return {
+    ...normalized,
+    route: {
+      ...normalized.route,
+      path: includePath ? samplePolyline(normalized.route.path) : [],
+    },
+  };
+}
+
 function normalizeAmapRoute(payload: unknown): NormalizedRoute | null {
   if (!payload || typeof payload !== "object") return null;
   const response = payload as { status?: string; route?: { paths?: Array<{ distance?: unknown; cost?: { duration?: unknown; tolls?: unknown }; steps?: Array<{ polyline?: unknown }> }> } };
@@ -95,7 +112,7 @@ function normalizeAmapRoute(payload: unknown): NormalizedRoute | null {
       distance,
       duration,
       tolls: numberValue(path.cost?.tolls),
-      path: path.steps?.flatMap((step) => parsePolyline(step.polyline)) ?? [],
+      path: samplePolyline(path.steps?.flatMap((step) => parsePolyline(step.polyline)) ?? []),
     },
   };
 }
@@ -410,6 +427,7 @@ const worker = {
       const origin = normalizeCoordinate(url.searchParams.get("origin"));
       const destination = normalizeCoordinate(url.searchParams.get("destination"));
       const policy = url.searchParams.get("policy") ?? "0";
+      const includePath = url.searchParams.get("includePath") !== "0";
       const ferry = url.searchParams.get("ferry") ?? "0";
       const rawWaypoints = url.searchParams.get("waypoints") ?? "";
       const waypoints = rawWaypoints ? rawWaypoints.split(";").map(normalizeCoordinate) : [];
@@ -423,7 +441,7 @@ const worker = {
       if (env.ROADBOOK_KV) {
         const cached = await env.ROADBOOK_KV.get(cacheKey, "json") as NormalizedRoute | null;
         if (cached?.status === "1" && cached.route) {
-          return Response.json(cached, { headers: { "Cache-Control": `public, max-age=${AMAP_ROUTE_CACHE_TTL}`, "X-Route-Cache": "HIT" } });
+          return Response.json(routePayload(cached, includePath), { headers: { "Cache-Control": `public, max-age=${AMAP_ROUTE_CACHE_TTL}`, "X-Route-Cache": "HIT" } });
         }
       }
 
@@ -451,7 +469,7 @@ const worker = {
         const infocode = typeof payload.infocode === "string" ? payload.infocode : undefined;
         return Response.json({ status: "0", info, ...(infocode ? { infocode } : {}) }, { status: 502, headers: { "Cache-Control": "no-store" } });
       }
-      const response = Response.json(normalized, {
+      const response = Response.json(routePayload(normalized, includePath), {
         headers: {
           "Cache-Control": `public, max-age=${AMAP_ROUTE_CACHE_TTL}`,
           "X-Route-Cache": env.ROADBOOK_KV ? "MISS" : "BYPASS",

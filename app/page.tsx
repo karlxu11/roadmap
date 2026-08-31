@@ -2,6 +2,7 @@
 /* eslint-disable jsx-a11y/no-autofocus -- the note editor opens for immediate keyboard entry. */
 
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { flushSync } from "react-dom";
 import Link from "next/link";
 import { initialDays as importedDays } from "./roadbook-data";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
@@ -111,6 +112,8 @@ const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
 const ROUTE_FAILURE_RETRY_TTL = 15 * 1000;
 const ROUTE_REQUEST_CONCURRENCY = 4;
 const ROUTE_CACHE_PATH_MAX_POINTS = 240;
+const ROUTE_CACHE_SAVE_DELAY = 750;
+const BACKGROUND_ROUTE_DELAY = 4000;
 const DEFAULT_EDITOR_WIDTH = 67;
 const SEARCH_CACHE_TTL = 10 * 60 * 1000;
 const SHARE_QUERY_KEY = "share";
@@ -149,20 +152,22 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, task: (item: 
 function loadRouteCache(): RouteCache {
   if (typeof window === "undefined") return { legs: {}, paths: {}, errors: {} };
   try {
+    const now = Date.now();
     const parsed = JSON.parse(window.localStorage.getItem(ROUTE_CACHE_KEY) ?? "null") as Partial<RouteCache> | null;
     const legs = Object.fromEntries(Object.entries(parsed?.legs ?? {}).flatMap(([key, value]) => {
       if (!value || typeof value !== "object") return [];
       const candidate = value as Partial<CachedLeg>;
       if (typeof candidate.cachedAt !== "number" || !Number.isFinite(candidate.cachedAt)
+        || now - candidate.cachedAt >= ROUTE_CACHE_TTL
         || typeof candidate.distance !== "number" || !Number.isFinite(candidate.distance)
         || typeof candidate.duration !== "number" || !Number.isFinite(candidate.duration)) return [];
       const tolls = typeof candidate.tolls === "number" && Number.isFinite(candidate.tolls) ? candidate.tolls : null;
-      const path = normalizeRoutePath(candidate.path);
+      const path = sampleRoutePath(normalizeRoutePath(candidate.path), ROUTE_CACHE_PATH_MAX_POINTS);
       return [[key, { distance: candidate.distance, duration: candidate.duration, tolls, path: path.length >= 2 ? path : undefined, cachedAt: candidate.cachedAt } satisfies CachedLeg]];
     }));
     const paths = Object.fromEntries(Object.entries(parsed?.paths ?? {}).flatMap(([key, value]) => {
       if (!Array.isArray(value) || value.length < 2) return [];
-      const path = normalizeRoutePath(value);
+      const path = sampleRoutePath(normalizeRoutePath(value), ROUTE_CACHE_PATH_MAX_POINTS);
       return path.length >= 2 ? [[key, path]] : [];
     }));
     const errors = Object.fromEntries(Object.entries(parsed?.errors ?? {}).filter(([, retryAt]) => typeof retryAt === "number" && Number.isFinite(retryAt)));
@@ -249,7 +254,7 @@ async function fetchRouteLeg(stop: Stop, destination: Stop, includePath: boolean
       driving.search(new window.AMap.LngLat(stop.lng, stop.lat), new window.AMap.LngLat(destination.lng, destination.lat), { extensions: includePath ? "all" : "base" }, (status, result) => {
         window.clearTimeout(timeout);
         const route = typeof result === "object" ? result.routes?.[0] : undefined;
-        const path = includePath ? routePathFromResult(route) : [];
+        const path = includePath ? sampleRoutePath(routePathFromResult(route), ROUTE_CACHE_PATH_MAX_POINTS) : [];
         resolve(status === "complete" && route && Number.isFinite(route.distance) && Number.isFinite(route.time)
           ? { distance: route.distance, duration: route.time, tolls: typeof route.tolls === "number" && Number.isFinite(route.tolls) ? route.tolls : null, path: path.length >= 2 ? path : undefined, cachedAt: Date.now() }
           : null);
@@ -267,13 +272,20 @@ async function fetchRouteLeg(stop: Stop, destination: Stop, includePath: boolean
       origin: `${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`,
       destination: `${destination.lng.toFixed(6)},${destination.lat.toFixed(6)}`,
       policy: "0",
+      includePath: includePath ? "1" : "0",
     });
     const response = await fetch(`/api/amap/route?${params.toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "force-cache" });
     // Worker 上游高德返回 5xx/限流时，回退到已经加载的 JS API，避免整段路线被判失败。
     if (!response.ok) return response.status === 404 || response.status === 429 || response.status >= 500 ? requestWithJsApi() : null;
     const payload = await response.json() as RouteApiPayload;
     if (payload.status !== "1" || !payload.route || typeof payload.route.distance !== "number" || typeof payload.route.duration !== "number") return null;
-    const metric = { distance: payload.route.distance, duration: payload.route.duration, tolls: typeof payload.route.tolls === "number" ? payload.route.tolls : null, path: normalizeRoutePath(payload.route.path), cachedAt: Date.now() };
+    const metric = {
+      distance: payload.route.distance,
+      duration: payload.route.duration,
+      tolls: typeof payload.route.tolls === "number" ? payload.route.tolls : null,
+      path: includePath ? sampleRoutePath(normalizeRoutePath(payload.route.path), ROUTE_CACHE_PATH_MAX_POINTS) : [],
+      cachedAt: Date.now(),
+    };
     if (includePath && !hasDrawableRoutePath(metric.path)) return requestWithJsApi();
     return metric;
   } catch {
@@ -699,12 +711,14 @@ export default function Home() {
   const [legMetrics, setLegMetrics] = useState<Record<string, { status: "loading" | "ready" | "error"; distance?: number; duration?: number; tolls?: number }>>({});
   const [serviceAreaLegs, setServiceAreaLegs] = useState<Record<string, ServiceAreaLegState>>({});
   const [activeServiceAreaLeg, setActiveServiceAreaLeg] = useState<string | null>(null);
+  const [routeCacheLegs, setRouteCacheLegs] = useState<Record<string, CachedLeg>>({});
   const [routeCacheVersion, setRouteCacheVersion] = useState(0);
   const [selectedRouteCacheVersion, setSelectedRouteCacheVersion] = useState(0);
   const [routeRetryVersion, setRouteRetryVersion] = useState(0);
   const [settings, setSettings] = useState({ jsKey: "", securityCode: "", webKey: "" });
   const [editorWidth, setEditorWidth] = useState(DEFAULT_EDITOR_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
+  const [printPayload, setPrintPayload] = useState<{ roadbook: Roadbook; routeCache: RouteCache } | null>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<AMapMap | null>(null);
@@ -713,6 +727,7 @@ export default function Home() {
   const routeCacheRef = useRef<RouteCache>({ legs: {}, paths: {}, errors: {} });
   const pendingLegsRef = useRef(new Map<string, Promise<CachedLeg | null>>());
   const pendingServiceAreasRef = useRef(new Map<string, Promise<void>>());
+  const routeCacheSaveHandleRef = useRef<{ kind: "idle" | "timeout"; id: number } | null>(null);
   const placeSearchRef = useRef<AMapPlaceSearch | null>(null);
   const searchCacheRef = useRef(new Map<string, { results: SearchResult[]; cachedAt: number }>());
   const searchAbortRef = useRef<AbortController | null>(null);
@@ -731,15 +746,13 @@ export default function Home() {
     return Object.fromEntries(Object.entries(sharedSnapshot.legs).map(([stopId, metric]) => [stopId, { status: "ready" as const, ...metric }])) as typeof legMetrics;
   }, [legMetrics, sharedSnapshot]);
   const dayDistanceSummaries = useMemo(() => {
-    const now = Date.now();
     const cacheRevision = routeCacheVersion;
     return days.map((day) => {
       const metrics = day.stops.slice(0, -1).map((stop, index) => {
         const displayed = displayLegMetrics[stop.id];
         if (displayed?.status === "ready" && typeof displayed.distance === "number") return displayed;
         if (sharedSnapshot) return undefined;
-        const cached = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
-        return isFreshCachedLeg(cached, now) ? cached : undefined;
+        return routeCacheLegs[legCacheKey(stop, day.stops[index + 1])];
       });
       const complete = metrics.every((metric) => metric && typeof metric.distance === "number");
       return {
@@ -749,7 +762,7 @@ export default function Home() {
         cacheRevision,
       };
     });
-  }, [days, displayLegMetrics, routeCacheVersion, sharedSnapshot]);
+  }, [days, displayLegMetrics, routeCacheLegs, routeCacheVersion, sharedSnapshot]);
   const dayDistanceById = useMemo(() => Object.fromEntries(dayDistanceSummaries.map((summary) => [summary.dayId, summary])), [dayDistanceSummaries]);
   const roadbookDistanceSummary = useMemo(() => {
     const complete = dayDistanceSummaries.every((summary) => summary.complete);
@@ -778,29 +791,26 @@ export default function Home() {
   }, [displayLegMetrics, selectedDay.stops]);
   const selectedDayHasRouteError = !readOnly && selectedDay.stops.slice(0, -1).some((stop) => displayLegMetrics[stop.id]?.status === "error");
   const allRoadbookTolls = useMemo(() => {
-    const now = Date.now();
     const cachedLegs = days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => sharedSnapshot
       ? sharedSnapshot.legs[stop.id]
-      : routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])]));
+      : routeCacheLegs[legCacheKey(stop, day.stops[index + 1])]));
     const complete = sharedSnapshot
       ? cachedLegs.every((leg) => leg && typeof leg.tolls === "number")
-      : cachedLegs.every((leg) => isFreshCachedLeg(leg as CachedLeg, now) && typeof leg?.tolls === "number");
+      : cachedLegs.every((leg) => leg && typeof leg.tolls === "number");
     return {
       complete,
       amount: complete ? cachedLegs.reduce((sum, leg) => sum + (leg?.tolls ?? 0), 0) : undefined,
       cacheVersion: routeCacheVersion,
     };
-  }, [days, routeCacheVersion, sharedSnapshot]);
+  }, [days, routeCacheLegs, routeCacheVersion, sharedSnapshot]);
   const cumulativeTollDays = useMemo(() => {
-    const now = Date.now();
     const cacheRevision = routeCacheVersion;
     return days.slice(0, selectedDayIndex + 1).map((day) => {
       const metrics = day.stops.slice(0, -1).map((stop, index) => {
         if (sharedSnapshot) return sharedSnapshot.legs[stop.id];
         const current = day.id === selectedDay.id ? displayLegMetrics[stop.id] : undefined;
         if (current?.status === "ready") return current;
-        const cached = routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])];
-        return isFreshCachedLeg(cached, now) ? cached : undefined;
+        return routeCacheLegs[legCacheKey(stop, day.stops[index + 1])];
       });
       const complete = metrics.every((metric) => metric && typeof metric.tolls === "number");
       return {
@@ -810,7 +820,7 @@ export default function Home() {
         cacheRevision,
       };
     });
-  }, [days, displayLegMetrics, routeCacheVersion, selectedDay, selectedDayIndex, sharedSnapshot]);
+  }, [days, displayLegMetrics, routeCacheLegs, routeCacheVersion, selectedDay, selectedDayIndex, sharedSnapshot]);
   const cumulativeTollsComplete = cumulativeTollDays.every(({ complete }) => complete);
   const cumulativeTollsAmount = cumulativeTollsComplete ? cumulativeTollDays.reduce((sum, item) => sum + (item.amount ?? 0), 0) : undefined;
   const routeDistance = routeSummary ? formatDistance(routeSummary.distance) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
@@ -833,6 +843,31 @@ export default function Home() {
     return arrivalTimes;
   }, [departureTime, displayLegMetrics, selectedDay.stops]);
   const tripStartDateValue = formatCalendarDate(getRoadbookStartDate(starterTrip));
+
+  function flushScheduledRouteCacheSave() {
+    const handle = routeCacheSaveHandleRef.current;
+    if (!handle) return;
+    if (handle.kind === "idle") window.cancelIdleCallback(handle.id);
+    else window.clearTimeout(handle.id);
+    routeCacheSaveHandleRef.current = null;
+    saveRouteCache(routeCacheRef.current);
+  }
+
+  function scheduleRouteCacheSave() {
+    if (routeCacheSaveHandleRef.current) return;
+    const persist = () => {
+      routeCacheSaveHandleRef.current = null;
+      saveRouteCache(routeCacheRef.current);
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      routeCacheSaveHandleRef.current = {
+        kind: "idle",
+        id: window.requestIdleCallback(persist, { timeout: 2500 }),
+      };
+      return;
+    }
+    routeCacheSaveHandleRef.current = { kind: "timeout", id: window.setTimeout(persist, ROUTE_CACHE_SAVE_DELAY) };
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -910,9 +945,39 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    setSettings(loadSavedSettings());
-    routeCacheRef.current = loadRouteCache();
-    setRouteCacheVersion((version) => version + 1);
+    queueMicrotask(() => {
+      setSettings(loadSavedSettings());
+      const cache = loadRouteCache();
+      routeCacheRef.current = cache;
+      setRouteCacheLegs(cache.legs);
+      setRouteCacheVersion((version) => version + 1);
+    });
+  }, []);
+
+  useEffect(() => {
+    const handleBeforePrint = () => {
+      flushSync(() => setPrintPayload({ roadbook: activeRoadbook, routeCache: routeCacheRef.current }));
+    };
+    const handleAfterPrint = () => setPrintPayload(null);
+    window.addEventListener("beforeprint", handleBeforePrint);
+    window.addEventListener("afterprint", handleAfterPrint);
+    return () => {
+      window.removeEventListener("beforeprint", handleBeforePrint);
+      window.removeEventListener("afterprint", handleAfterPrint);
+    };
+  }, [activeRoadbook]);
+
+  useEffect(() => {
+    const handlePageHide = () => flushScheduledRouteCacheSave();
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      flushScheduledRouteCacheSave();
+      markersRef.current.forEach((marker) => marker.setMap(null));
+      routeLineRef.current?.setMap(null);
+      mapRef.current?.destroy();
+      mapRef.current = null;
+    };
   }, []);
 
   useEffect(() => () => {
@@ -921,8 +986,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    setServiceAreaLegs({});
-    setActiveServiceAreaLeg(null);
+    queueMicrotask(() => {
+      setServiceAreaLegs({});
+      setActiveServiceAreaLeg(null);
+    });
   }, [selectedDayRouteDependencyKey]);
 
   useEffect(() => {
@@ -960,35 +1027,36 @@ export default function Home() {
   useEffect(() => {
     if (storageStatus === "loading" || !amapLoaded || !window.AMap || !mapContainer.current) return;
     const AMap = window.AMap;
-    try {
-      if (!mapRef.current) {
-        mapRef.current = new AMap.Map(mapContainer.current, {
-          zoom: 7,
-          center: [102.3, 30.05],
-          resizeEnable: true,
-        });
-        placeSearchRef.current = new AMap.PlaceSearch({ pageSize: 20, pageIndex: 1, city: "全国", citylimit: false, extensions: "all" });
-      }
-      const map = mapRef.current;
-      if (!map) throw new Error("AMap.Map 未创建");
-      markersRef.current.forEach((marker) => marker.setMap(null));
-      markersRef.current = selectedDay.stops.map((stop, index) => new AMap.Marker({
-        map,
-        position: [stop.lng, stop.lat],
-        title: stop.name,
-        label: { content: `<span class="amap-label">${index + 1}. ${stop.name}</span>`, direction: "top" },
-      }));
-      map.setFitView(markersRef.current);
-      queueMicrotask(() => setMapReady(true));
-    } catch (error) {
-      queueMicrotask(() => {
+    // AMap marker construction and setFitView can be expensive. Moving them to the
+    // next frame lets React close the add-place modal and paint the new day first.
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        if (!mapRef.current) {
+          mapRef.current = new AMap.Map(mapContainer.current!, {
+            zoom: 7,
+            center: [102.3, 30.05],
+            resizeEnable: true,
+          });
+          placeSearchRef.current = new AMap.PlaceSearch({ pageSize: 20, pageIndex: 1, city: "全国", citylimit: false, extensions: "all" });
+        }
+        const map = mapRef.current;
+        if (!map) throw new Error("AMap.Map 未创建");
+        const nextMarkers = selectedDay.stops.map((stop, index) => new AMap.Marker({
+          map,
+          position: [stop.lng, stop.lat],
+          title: stop.name,
+          label: { content: `<span class="amap-label">${index + 1}. ${stop.name}</span>`, direction: "top" },
+        }));
+        markersRef.current.forEach((marker) => marker.setMap(null));
+        markersRef.current = nextMarkers;
+        map.setFitView(nextMarkers);
+        setMapReady(true);
+      } catch (error) {
         setMapReady(false);
         setMapError(`高德地图初始化失败：${error instanceof Error ? error.message : "请检查 JS API Key 和安全密钥"}`);
-      });
-    }
-    return () => {
-      markersRef.current.forEach((marker) => marker.setMap(null));
-    };
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
   // 地点顺序或坐标变化时才重建标记；路线指标更新不应反复重建整张地图。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amapLoaded, storageStatus, deferredSelectedDayRouteDependencyKey]);
@@ -1005,20 +1073,23 @@ export default function Home() {
     if (!readOnly) {
       if (combinedPath.length >= 2) routeCacheRef.current.paths[routeKey] = combinedPath;
       else delete routeCacheRef.current.paths[routeKey];
-      saveRouteCache(routeCacheRef.current);
+      scheduleRouteCacheSave();
     }
-    routeLineRef.current?.setMap(null);
-    routeLineRef.current = null;
-    if (cachedPath.length >= 2) {
-      routeLineRef.current = new window.AMap.Polyline({ path: cachedPath, strokeColor: "#dc6b3f", strokeWeight: 5, strokeOpacity: 0.82, lineJoin: "round" });
-      routeLineRef.current.setMap(map);
-      map.setFitView([...markersRef.current, routeLineRef.current]);
-    }
+    const frame = window.requestAnimationFrame(() => {
+      routeLineRef.current?.setMap(null);
+      routeLineRef.current = null;
+      if (cachedPath.length >= 2) {
+        routeLineRef.current = new window.AMap!.Polyline({ path: cachedPath, strokeColor: "#dc6b3f", strokeWeight: 5, strokeOpacity: 0.82, lineJoin: "round" });
+        routeLineRef.current.setMap(map);
+        map.setFitView([...markersRef.current, routeLineRef.current]);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amapLoaded, readOnly, deferredSelectedDayRouteDependencyKey, selectedRouteCacheVersion, sharedSnapshot, storageStatus]);
 
   useEffect(() => {
-    if (readOnly || hasShareQuery() || storageStatus === "loading" || !amapLoaded || !window.AMap) {
+    if (readOnly || hasShareQuery() || storageStatus === "loading") {
       queueMicrotask(() => setLegMetrics({}));
       return;
     }
@@ -1035,29 +1106,32 @@ export default function Home() {
     }));
     setLegMetrics(initialMetrics);
 
-    const allLegs = days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => ({
+    const selectedLegs = selectedDay.stops.slice(0, -1).map((stop, index) => ({
       stop,
-      destination: day.stops[index + 1],
-      key: legCacheKey(stop, day.stops[index + 1]),
-      isSelectedDay: day.id === selectedDay.id,
-    })).filter(({ stop, destination }) => !isRoutePlaceholder(stop) && !isRoutePlaceholder(destination)));
-    // 当前天的路线优先计算，避免首次打开或调整顺序时让大量高德请求争抢主线程。
-    const targetLegs = allLegs;
+      destination: selectedDay.stops[index + 1],
+      key: legCacheKey(stop, selectedDay.stops[index + 1]),
+    })).filter(({ stop, destination }) => !isRoutePlaceholder(stop) && !isRoutePlaceholder(destination));
     const scheduleNextRetry = () => {
       if (retryTimer !== null) window.clearTimeout(retryTimer);
-      const retryAt = Math.min(...targetLegs.map(({ key }) => routeCacheRef.current.errors[key] ?? Infinity));
+      const retryAt = Math.min(...selectedLegs.map(({ key }) => routeCacheRef.current.errors[key] ?? Infinity));
       if (!Number.isFinite(retryAt)) return;
       retryTimer = window.setTimeout(() => {
         retryTimer = null;
         if (!cancelled) setRouteRetryVersion((version) => version + 1);
       }, Math.max(0, retryAt - Date.now()));
     };
-    const missingLegs = targetLegs.filter(({ key, isSelectedDay }) => {
+    const missingLegs = selectedLegs.filter(({ key }) => {
       const cached = routeCacheRef.current.legs[key];
-      return !isFreshCachedLeg(cached, now, isSelectedDay) && (routeCacheRef.current.errors[key] ?? 0) <= now;
+      return !isFreshCachedLeg(cached, now, true) && (routeCacheRef.current.errors[key] ?? 0) <= now;
     });
     scheduleNextRetry();
-    const applyRouteEntries = (entries: Array<{ stopId: string; key: string; isSelectedDay: boolean; metric: CachedLeg | null }>) => {
+    if (missingLegs.length) {
+      void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key }) => ({
+        stopId: stop.id,
+        key,
+        metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, true),
+      })).then((entries) => {
+        if (cancelled) return;
       entries.forEach(({ key, metric }) => {
         if (metric) {
           routeCacheRef.current.legs[key] = metric;
@@ -1067,38 +1141,89 @@ export default function Home() {
         }
       });
       if (entries.length) {
-        saveRouteCache(routeCacheRef.current);
-        setRouteCacheVersion((version) => version + 1);
-        if (entries.some(({ isSelectedDay }) => isSelectedDay)) setSelectedRouteCacheVersion((version) => version + 1);
+          scheduleRouteCacheSave();
+          startTransition(() => {
+            setRouteCacheLegs({ ...routeCacheRef.current.legs });
+            setRouteCacheVersion((version) => version + 1);
+            setSelectedRouteCacheVersion((version) => version + 1);
+          });
       }
       scheduleNextRetry();
-      if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.filter(({ isSelectedDay }) => isSelectedDay).map(({ stopId, key }) => {
+        startTransition(() => setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.map(({ stopId, key }) => {
         const cached = routeCacheRef.current.legs[key];
         return [stopId, isFreshCachedLeg(cached) ? { status: "ready" as const, ...displayCachedLeg(cached) } : { status: "error" as const }];
-      })) }));
-    };
-    const requestMissingLegs = (legs: typeof missingLegs, concurrency = ROUTE_REQUEST_CONCURRENCY) => {
-      if (!legs.length) return;
-      void mapWithConcurrency(legs, concurrency, async ({ stop, destination, key, isSelectedDay }) => ({ stopId: stop.id, key, isSelectedDay, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, isSelectedDay) })).then(applyRouteEntries);
-    };
-    const foregroundLegs = missingLegs.filter(({ isSelectedDay }) => isSelectedDay);
-    const backgroundLegs = missingLegs.filter(({ isSelectedDay }) => !isSelectedDay);
-    requestMissingLegs(foregroundLegs);
-    let backgroundTimer: number | null = null;
-    if (backgroundLegs.length) {
-      backgroundTimer = window.setTimeout(() => {
-        backgroundTimer = null;
-        if (!cancelled) requestMissingLegs(backgroundLegs, 1);
-      }, 3000);
+        })) })));
+      });
     }
     return () => {
       cancelled = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
-      if (backgroundTimer !== null) window.clearTimeout(backgroundTimer);
     };
-  // 路线计算只依赖路线指纹；标题、备注和出发时间变化不应重新触发高德请求。
+  // 当前天单独计算，不再被整本路书的预热队列拖住。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, readOnly, deferredRoutePlanDependencyKey, deferredSelectedDayRouteDependencyKey, routeRetryVersion, storageStatus]);
+  }, [amapLoaded, readOnly, deferredSelectedDayRouteDependencyKey, routeRetryVersion, storageStatus]);
+
+  useEffect(() => {
+    if (readOnly || hasShareQuery() || storageStatus === "loading") return;
+    let cancelled = false;
+    let startTimer: number | null = null;
+    let retryTimer: number | null = null;
+    const backgroundLegs = days.flatMap((day) => day.id === selectedDay.id ? [] : day.stops.slice(0, -1).map((stop, index) => ({
+      stop,
+      destination: day.stops[index + 1],
+      key: legCacheKey(stop, day.stops[index + 1]),
+    })).filter(({ stop, destination }) => !isRoutePlaceholder(stop) && !isRoutePlaceholder(destination)));
+
+    const warmRoutes = async () => {
+      let updatesSinceRender = 0;
+      for (const { stop, destination, key } of backgroundLegs) {
+        if (cancelled) return;
+        const now = Date.now();
+        if (isFreshCachedLeg(routeCacheRef.current.legs[key], now) || (routeCacheRef.current.errors[key] ?? 0) > now) continue;
+        const metric = await requestRouteLeg(stop, destination, key, pendingLegsRef.current, false);
+        if (cancelled) return;
+        if (metric) {
+          routeCacheRef.current.legs[key] = metric;
+          delete routeCacheRef.current.errors[key];
+        } else {
+          routeCacheRef.current.errors[key] = Date.now() + ROUTE_FAILURE_RETRY_TTL;
+        }
+        updatesSinceRender += 1;
+        scheduleRouteCacheSave();
+        if (updatesSinceRender >= 4) {
+          updatesSinceRender = 0;
+          startTransition(() => {
+            setRouteCacheLegs({ ...routeCacheRef.current.legs });
+            setRouteCacheVersion((version) => version + 1);
+          });
+        }
+      }
+      if (cancelled) return;
+      if (updatesSinceRender) startTransition(() => {
+        setRouteCacheLegs({ ...routeCacheRef.current.legs });
+        setRouteCacheVersion((version) => version + 1);
+      });
+      const retryAt = Math.min(...backgroundLegs.map(({ key }) => routeCacheRef.current.errors[key] ?? Infinity));
+      if (Number.isFinite(retryAt)) {
+        retryTimer = window.setTimeout(() => {
+          retryTimer = null;
+          if (!cancelled) setRouteRetryVersion((version) => version + 1);
+        }, Math.max(0, retryAt - Date.now()));
+      }
+    };
+
+    // 先留出几秒给用户完成添加、切换等交互，再串行预热其他天的基础指标。
+    startTimer = window.setTimeout(() => {
+      startTimer = null;
+      void warmRoutes();
+    }, BACKGROUND_ROUTE_DELAY);
+    return () => {
+      cancelled = true;
+      if (startTimer !== null) window.clearTimeout(startTimer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amapLoaded, readOnly, deferredRoutePlanDependencyKey, selectedDay.id, routeRetryVersion, storageStatus]);
 
   function updateEditorWidth(clientX: number) {
     const workspace = workspaceRef.current;
@@ -1304,21 +1429,23 @@ export default function Home() {
   }
 
   function insertServiceArea(afterStopId: string, area: RouteServiceArea) {
-    updateSelectedDay((day) => {
-      const index = day.stops.findIndex((stop) => stop.id === afterStopId);
-      if (index < 0) return day;
-      const inserted: Stop = {
-        id: uid("stop"),
-        name: area.name,
-        area: area.address,
-        kind: "途经",
-        lat: area.lat,
-        lng: area.lng,
-        duration: "服务区停靠",
-      };
-      return { ...day, stops: [...day.stops.slice(0, index + 1), inserted, ...day.stops.slice(index + 1)] };
-    });
     setActiveServiceAreaLeg(null);
+    startTransition(() => {
+      updateSelectedDay((day) => {
+        const index = day.stops.findIndex((stop) => stop.id === afterStopId);
+        if (index < 0) return day;
+        const inserted: Stop = {
+          id: uid("stop"),
+          name: area.name,
+          area: area.address,
+          kind: "途经",
+          lat: area.lat,
+          lng: area.lng,
+          duration: "服务区停靠",
+        };
+        return { ...day, stops: [...day.stops.slice(0, index + 1), inserted, ...day.stops.slice(index + 1)] };
+      });
+    });
     flash(`已把「${area.name}」加入两个地点之间`);
   }
 
@@ -1480,10 +1607,12 @@ export default function Home() {
       lng: result.location?.lng ?? fallback.lng,
       duration: "待安排",
     };
-    updateSelectedDay((day) => ({ ...day, stops: [...day.stops, stop] }));
     setQuery("");
     setSearchResults([]);
     setShowAddPlace(false);
+    startTransition(() => {
+      updateSelectedDay((day) => ({ ...day, stops: [...day.stops, stop] }));
+    });
     flash(`已把「${result.name}」加入第 ${days.findIndex((day) => day.id === selectedDayId) + 1} 天`);
   }
 
@@ -1570,7 +1699,8 @@ export default function Home() {
   }
 
   function exportPdf() {
-    window.print();
+    flushSync(() => setPrintPayload({ roadbook: activeRoadbook, routeCache: routeCacheRef.current }));
+    window.requestAnimationFrame(() => window.print());
   }
 
   function buildSharePaths(roadbook: Roadbook) {
@@ -1609,6 +1739,7 @@ export default function Home() {
     });
     if (entries.length) {
       saveRouteCache(routeCacheRef.current);
+      setRouteCacheLegs({ ...routeCacheRef.current.legs });
       setRouteCacheVersion((version) => version + 1);
     }
     const paths = buildSharePaths(roadbook);
@@ -1739,10 +1870,6 @@ export default function Home() {
     } finally {
       setIsPreparingShare(false);
     }
-  }
-
-  function getPrintLegMetric(from: Stop, to: Stop) {
-    return routeCacheRef.current.legs[legCacheKey(from, to)];
   }
 
   function saveSettings(next: typeof settings) {
@@ -1897,33 +2024,7 @@ export default function Home() {
         </section>
       </div>
 
-      <div className="print-only roadbook-print">
-        <div className="print-cover"><div className="print-mark">路</div><div className="eyebrow">ROAM NOTE / ROADBOOK</div><h1>{starterTrip.title}</h1><p>{starterTrip.description}</p><div className="print-summary">{starterTrip.region} · {days.length} 天 · {totalStops} 个地点</div></div>
-        {days.map((day, dayIndex) => {
-          const metrics = day.stops.slice(0, -1).map((stop, stopIndex) => getPrintLegMetric(stop, day.stops[stopIndex + 1]));
-          const totalDistance = metrics.reduce((sum, metric) => sum + (metric?.distance ?? 0), 0);
-          const totalDuration = metrics.reduce((sum, metric) => sum + (metric?.duration ?? 0), 0);
-          const hasCompleteMetrics = metrics.length > 0 && metrics.every(Boolean);
-          return <section className="print-day" key={day.id}>
-            <div className="print-day-heading"><span>DAY {String(dayIndex + 1).padStart(2, "0")}</span><small>{day.date}</small></div>
-            <h2>{day.title}</h2>
-            <p className="print-subtitle">{day.subtitle}</p>
-            <ol>{day.stops.map((stop, stopIndex) => {
-              const nextStop = day.stops[stopIndex + 1];
-              const metric = nextStop ? metrics[stopIndex] : undefined;
-              return <li key={stop.id}>
-                <strong>{stop.name}</strong>
-                <span>{stop.kind} · {stop.duration}</span>
-                <small>{stop.area}</small>
-                {nextStop && <small className="print-leg">↘ 约 {metric ? formatDistance(metric.distance) : "距离待计算"} · {metric ? formatDuration(metric.duration) : "驾驶时间待计算"}</small>}
-                {stop.note && <em>{stop.note}</em>}
-              </li>;
-            })}</ol>
-            <div className="print-day-total"><span>当天驾驶</span><strong>{hasCompleteMetrics ? `${formatDistance(totalDistance)} · ${formatDuration(totalDuration)}` : "部分路线尚未计算"}</strong></div>
-          </section>;
-        })}
-        <footer className="print-footer">路书 · ROAM NOTE | 由高德路线数据辅助整理</footer>
-      </div>
+      {printPayload && <PrintRoadbook roadbook={printPayload.roadbook} routeCache={printPayload.routeCache} />}
 
       {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} onDelete={deleteRoadbook} />}
       {showCopyRoadbook && <CopyRoadbookModal sourceTitle={activeRoadbook.title} onClose={() => setShowCopyRoadbook(false)} onSave={copyRoadbook} />}
@@ -1937,6 +2038,37 @@ export default function Home() {
       {mapError && <button className="map-error" type="button" onClick={() => setMapError("")}>{mapError} <span>×</span></button>}
     </main>
   );
+}
+
+function PrintRoadbook({ roadbook, routeCache }: { roadbook: Roadbook; routeCache: RouteCache }) {
+  const totalStops = roadbook.days.reduce((sum, day) => sum + day.stops.length, 0);
+  return <div className="print-only roadbook-print">
+    <div className="print-cover"><div className="print-mark">路</div><div className="eyebrow">ROAM NOTE / ROADBOOK</div><h1>{roadbook.title}</h1><p>{roadbook.description}</p><div className="print-summary">{roadbook.region} · {roadbook.days.length} 天 · {totalStops} 个地点</div></div>
+    {roadbook.days.map((day, dayIndex) => {
+      const metrics = day.stops.slice(0, -1).map((stop, stopIndex) => routeCache.legs[legCacheKey(stop, day.stops[stopIndex + 1])]);
+      const totalDistance = metrics.reduce((sum, metric) => sum + (metric?.distance ?? 0), 0);
+      const totalDuration = metrics.reduce((sum, metric) => sum + (metric?.duration ?? 0), 0);
+      const hasCompleteMetrics = metrics.length > 0 && metrics.every(Boolean);
+      return <section className="print-day" key={day.id}>
+        <div className="print-day-heading"><span>DAY {String(dayIndex + 1).padStart(2, "0")}</span><small>{day.date}</small></div>
+        <h2>{day.title}</h2>
+        <p className="print-subtitle">{day.subtitle}</p>
+        <ol>{day.stops.map((stop, stopIndex) => {
+          const nextStop = day.stops[stopIndex + 1];
+          const metric = nextStop ? metrics[stopIndex] : undefined;
+          return <li key={stop.id}>
+            <strong>{stop.name}</strong>
+            <span>{stop.kind} · {stop.duration}</span>
+            <small>{stop.area}</small>
+            {nextStop && <small className="print-leg">↘ 约 {metric ? formatDistance(metric.distance) : "距离待计算"} · {metric ? formatDuration(metric.duration) : "驾驶时间待计算"}</small>}
+            {stop.note && <em>{stop.note}</em>}
+          </li>;
+        })}</ol>
+        <div className="print-day-total"><span>当天驾驶</span><strong>{hasCompleteMetrics ? `${formatDistance(totalDistance)} · ${formatDuration(totalDuration)}` : "部分路线尚未计算"}</strong></div>
+      </section>;
+    })}
+    <footer className="print-footer">路书 · ROAM NOTE | 由高德路线数据辅助整理</footer>
+  </div>;
 }
 
 function RoadbookLibraryModal({ roadbooks, activeRoadbookId, onClose, onSelect, onCreate, onDelete }: { roadbooks: Roadbook[]; activeRoadbookId: string; onClose: () => void; onSelect: (id: string) => void; onCreate: (title: string, description: string) => void; onDelete: (id: string) => void }) {

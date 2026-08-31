@@ -19,7 +19,7 @@ const localBindingConfig = {
   // the generated Wrangler config is deployed.
   keep_vars: true,
   secrets: {
-    required: ["AMAP_SECURITY_CODE", "AMAP_WEB_SERVICE_KEY", "SITE_PASSWORD"],
+    required: ["AMAP_JS_KEY", "AMAP_SECURITY_CODE", "AMAP_WEB_SERVICE_KEY", "SITE_PASSWORD"],
   },
   compatibility_flags: ["nodejs_compat"],
   d1_databases: d1

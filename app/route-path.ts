@@ -14,8 +14,10 @@ export function hasDrawableRoutePath(path: RoutePathPoint[] | undefined) {
 
 export function combineRoutePaths(paths: Array<RoutePathPoint[] | undefined>) {
   if (!paths.length || paths.some((path) => !hasDrawableRoutePath(path))) return [] as RoutePathPoint[];
-  return paths.reduce<RoutePathPoint[]>((combined, path) => [
-    ...combined,
-    ...(combined.length ? path!.slice(1) : path!),
-  ], []);
+  const combined: RoutePathPoint[] = [];
+  paths.forEach((path) => {
+    const startIndex = combined.length ? 1 : 0;
+    for (let index = startIndex; index < path!.length; index += 1) combined.push(path![index]);
+  });
+  return combined;
 }

@@ -37,7 +37,7 @@ test("server-renders the roadbook workspace", async () => {
   assert.match(html, /分享管理/);
   assert.match(html, /新路书/);
   assert.match(html, /导出 PDF/);
-  assert.match(html, /路书 · ROAM NOTE \| 由高德路线数据辅助整理/);
+  assert.doesNotMatch(html, /class="print-only roadbook-print"/);
   assert.match(html, /接入高德地图，查看真实路线/);
   assert.match(html, /--editor-track:67fr/);
   assert.match(html, /--map-track:33fr/);
@@ -99,7 +99,7 @@ test("serves sidebar route metrics from the Worker KV cache", async () => {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("route-cache", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
-  const cachedRoute = { status: "1", info: "OK", route: { distance: 128400, duration: 7200, tolls: 54, path: [] } };
+  const cachedRoute = { status: "1", info: "OK", route: { distance: 128400, duration: 7200, tolls: 54, path: [[114, 22], [110, 26], [106.5, 29.5]] } };
   const cacheKey = "amap-route-v1:114.000000,22.000000|106.500000,29.500000|policy=0|ferry=0|waypoints=";
   const kv = {
     async get(key) { return key === cacheKey ? cachedRoute : null; },
@@ -107,13 +107,20 @@ test("serves sidebar route metrics from the Worker KV cache", async () => {
     async delete() {},
   };
   const response = await worker.fetch(
-    new Request("http://localhost/api/amap/route?origin=114,22&destination=106.5,29.5&policy=0"),
+    new Request("http://localhost/api/amap/route?origin=114,22&destination=106.5,29.5&policy=0&includePath=0"),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv, AMAP_WEB_SERVICE_KEY: "test-key" },
     { waitUntil() {}, passThroughOnException() {} },
   );
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-route-cache"), "HIT");
-  assert.deepEqual(await response.json(), cachedRoute);
+  assert.deepEqual(await response.json(), { ...cachedRoute, route: { ...cachedRoute.route, path: [] } });
+
+  const pathResponse = await worker.fetch(
+    new Request("http://localhost/api/amap/route?origin=114,22&destination=106.5,29.5&policy=0&includePath=1"),
+    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, ROADBOOK_KV: kv, AMAP_WEB_SERVICE_KEY: "test-key" },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  assert.deepEqual(await pathResponse.json(), cachedRoute);
 });
 
 test("share pages bypass the editor password", async () => {
