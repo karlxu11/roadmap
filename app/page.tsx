@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable jsx-a11y/no-autofocus -- the note editor opens for immediate keyboard entry. */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { initialDays as importedDays } from "./roadbook-data";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
@@ -661,6 +661,7 @@ export default function Home() {
   const [serviceAreaLegs, setServiceAreaLegs] = useState<Record<string, ServiceAreaLegState>>({});
   const [activeServiceAreaLeg, setActiveServiceAreaLeg] = useState<string | null>(null);
   const [routeCacheVersion, setRouteCacheVersion] = useState(0);
+  const [selectedRouteCacheVersion, setSelectedRouteCacheVersion] = useState(0);
   const [routeRetryVersion, setRouteRetryVersion] = useState(0);
   const [settings, setSettings] = useState({ jsKey: "", securityCode: "", webKey: "" });
   const [editorWidth, setEditorWidth] = useState(DEFAULT_EDITOR_WIDTH);
@@ -920,8 +921,6 @@ export default function Home() {
   useEffect(() => {
     if (storageStatus === "loading" || !amapLoaded || !window.AMap || !mapContainer.current) return;
     const AMap = window.AMap;
-    const routeKey = routeCacheKey(selectedDay.stops);
-    const sharedPath = readOnly ? sharedSnapshot?.paths?.[routeKey] ?? [] : [];
     try {
       if (!mapRef.current) {
         mapRef.current = new AMap.Map(mapContainer.current, {
@@ -934,8 +933,6 @@ export default function Home() {
       const map = mapRef.current;
       if (!map) throw new Error("AMap.Map 未创建");
       markersRef.current.forEach((marker) => marker.setMap(null));
-      routeLineRef.current?.setMap(null);
-      routeLineRef.current = null;
       markersRef.current = selectedDay.stops.map((stop, index) => new AMap.Marker({
         map,
         position: [stop.lng, stop.lat],
@@ -943,20 +940,6 @@ export default function Home() {
         label: { content: `<span class="amap-label">${index + 1}. ${stop.name}</span>`, direction: "top" },
       }));
       map.setFitView(markersRef.current);
-      if (selectedDay.stops.length >= 2) {
-        const combinedPath = combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path));
-        const cachedPath = sharedPath.length >= 2 ? sharedPath : combinedPath;
-        if (!readOnly) {
-          if (combinedPath.length >= 2) routeCacheRef.current.paths[routeKey] = combinedPath;
-          else delete routeCacheRef.current.paths[routeKey];
-          saveRouteCache(routeCacheRef.current);
-        }
-        if (cachedPath?.length) {
-          routeLineRef.current = new AMap.Polyline({ path: cachedPath, strokeColor: "#dc6b3f", strokeWeight: 5, strokeOpacity: 0.82, lineJoin: "round" });
-          routeLineRef.current.setMap(map);
-          map.setFitView([...markersRef.current, routeLineRef.current]);
-        }
-      }
       queueMicrotask(() => setMapReady(true));
     } catch (error) {
       queueMicrotask(() => {
@@ -966,9 +949,34 @@ export default function Home() {
     }
     return () => {
       markersRef.current.forEach((marker) => marker.setMap(null));
-      routeLineRef.current?.setMap(null);
     };
-  }, [amapLoaded, readOnly, routeCacheVersion, selectedDay, sharedSnapshot, storageStatus]);
+  // 地点顺序或坐标变化时才重建标记；路线指标更新不应反复重建整张地图。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amapLoaded, storageStatus, selectedDayRouteDependencyKey]);
+
+  useEffect(() => {
+    if (storageStatus === "loading" || !amapLoaded || !window.AMap || !mapRef.current) return;
+    const map = mapRef.current;
+    const routeKey = routeCacheKey(selectedDay.stops);
+    const sharedPath = readOnly ? sharedSnapshot?.paths?.[routeKey] ?? [] : [];
+    const combinedPath = selectedDay.stops.length >= 2
+      ? combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path))
+      : [];
+    const cachedPath = sharedPath.length >= 2 ? sharedPath : combinedPath;
+    if (!readOnly) {
+      if (combinedPath.length >= 2) routeCacheRef.current.paths[routeKey] = combinedPath;
+      else delete routeCacheRef.current.paths[routeKey];
+      saveRouteCache(routeCacheRef.current);
+    }
+    routeLineRef.current?.setMap(null);
+    routeLineRef.current = null;
+    if (cachedPath.length >= 2) {
+      routeLineRef.current = new window.AMap.Polyline({ path: cachedPath, strokeColor: "#dc6b3f", strokeWeight: 5, strokeOpacity: 0.82, lineJoin: "round" });
+      routeLineRef.current.setMap(map);
+      map.setFitView([...markersRef.current, routeLineRef.current]);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amapLoaded, readOnly, selectedDayRouteDependencyKey, selectedRouteCacheVersion, sharedSnapshot, storageStatus]);
 
   useEffect(() => {
     if (readOnly || hasShareQuery() || storageStatus === "loading" || !amapLoaded || !window.AMap) {
@@ -993,7 +1001,7 @@ export default function Home() {
       key: legCacheKey(stop, day.stops[index + 1]),
       isSelectedDay: day.id === selectedDay.id,
     })));
-    // 左栏需要每日和全程里程，因此会补齐所有路段。每段优先读取 Worker KV 的 24 小时缓存。
+    // 当前天的路线优先计算，避免首次打开或调整顺序时让大量高德请求争抢主线程。
     const targetLegs = allLegs;
     const scheduleNextRetry = () => {
       if (retryTimer !== null) window.clearTimeout(retryTimer);
@@ -1009,7 +1017,7 @@ export default function Home() {
       return !isFreshCachedLeg(cached, now, isSelectedDay) && (routeCacheRef.current.errors[key] ?? 0) <= now;
     });
     scheduleNextRetry();
-    void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key, isSelectedDay }) => ({ stopId: stop.id, key, isSelectedDay, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, isSelectedDay) })).then((entries) => {
+    const applyRouteEntries = (entries: Array<{ stopId: string; key: string; isSelectedDay: boolean; metric: CachedLeg | null }>) => {
       entries.forEach(({ key, metric }) => {
         if (metric) {
           routeCacheRef.current.legs[key] = metric;
@@ -1021,16 +1029,32 @@ export default function Home() {
       if (entries.length) {
         saveRouteCache(routeCacheRef.current);
         setRouteCacheVersion((version) => version + 1);
+        if (entries.some(({ isSelectedDay }) => isSelectedDay)) setSelectedRouteCacheVersion((version) => version + 1);
       }
       scheduleNextRetry();
       if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.filter(({ isSelectedDay }) => isSelectedDay).map(({ stopId, key }) => {
         const cached = routeCacheRef.current.legs[key];
         return [stopId, isFreshCachedLeg(cached) ? { status: "ready" as const, ...displayCachedLeg(cached) } : { status: "error" as const }];
       })) }));
-    });
+    };
+    const requestMissingLegs = (legs: typeof missingLegs) => {
+      if (!legs.length) return;
+      void mapWithConcurrency(legs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key, isSelectedDay }) => ({ stopId: stop.id, key, isSelectedDay, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, isSelectedDay) })).then(applyRouteEntries);
+    };
+    const foregroundLegs = missingLegs.filter(({ isSelectedDay }) => isSelectedDay);
+    const backgroundLegs = missingLegs.filter(({ isSelectedDay }) => !isSelectedDay);
+    requestMissingLegs(foregroundLegs);
+    let backgroundTimer: number | null = null;
+    if (backgroundLegs.length) {
+      backgroundTimer = window.setTimeout(() => {
+        backgroundTimer = null;
+        if (!cancelled) requestMissingLegs(backgroundLegs);
+      }, 1200);
+    }
     return () => {
       cancelled = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (backgroundTimer !== null) window.clearTimeout(backgroundTimer);
     };
   // 路线计算只依赖路线指纹；标题、备注和出发时间变化不应重新触发高德请求。
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1137,7 +1161,9 @@ export default function Home() {
 
   function updateActiveDays(updater: (days: DayPlan[]) => DayPlan[]) {
     if (readOnly) return;
-    setRoadbooks((current) => current.map((roadbook) => roadbook.id === activeRoadbookId ? { ...roadbook, days: updater(roadbook.days) } : roadbook));
+    startTransition(() => {
+      setRoadbooks((current) => current.map((roadbook) => roadbook.id === activeRoadbookId ? { ...roadbook, days: updater(roadbook.days) } : roadbook));
+    });
   }
 
   function updateSelectedDay(updater: (day: DayPlan) => DayPlan) {
@@ -1450,6 +1476,23 @@ export default function Home() {
     setSelectedDayId(created.days[0].id);
     setShowLibrary(false);
     void commitRoadbooks(next, "新路书已创建并保存到云端");
+  }
+
+  function deleteRoadbook(id: string) {
+    const target = roadbooks.find((roadbook) => roadbook.id === id);
+    if (!target) return;
+    if (roadbooks.length === 1) {
+      flash("至少保留一条路书");
+      return;
+    }
+    if (!window.confirm(`确定删除「${target.title}」吗？此操作会删除这条路书的所有行程安排。`)) return;
+    const next = roadbooks.filter((roadbook) => roadbook.id !== id);
+    if (id === activeRoadbookId) {
+      const replacement = next[0];
+      setActiveRoadbookId(replacement.id);
+      setSelectedDayId(replacement.days[0]?.id ?? "");
+    }
+    void commitRoadbooks(next, `「${target.title}」已删除并同步到云端`);
   }
 
   function copyRoadbook(title: string) {
@@ -1822,7 +1865,7 @@ export default function Home() {
         <footer className="print-footer">路书 · ROAM NOTE | 由高德路线数据辅助整理</footer>
       </div>
 
-      {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} />}
+      {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} onDelete={deleteRoadbook} />}
       {showCopyRoadbook && <CopyRoadbookModal sourceTitle={activeRoadbook.title} onClose={() => setShowCopyRoadbook(false)} onSave={copyRoadbook} />}
       {showShareManager && <ShareManagerModal links={shareLinks} isLoading={isLoadingShareLinks} onClose={() => setShowShareManager(false)} onRefresh={() => void refreshShareLinks()} onCopy={(link) => void copyShareLink(link)} onRevoke={(link) => void revokeShareLink(link)} />}
       {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{formatSearchResultMeta(result)}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在结合当前行程位置搜索，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">搜索会结合当天行程位置、城市和全国结果，并优先显示名称最匹配的地点。</div></div></div>}
@@ -1836,10 +1879,10 @@ export default function Home() {
   );
 }
 
-function RoadbookLibraryModal({ roadbooks, activeRoadbookId, onClose, onSelect, onCreate }: { roadbooks: Roadbook[]; activeRoadbookId: string; onClose: () => void; onSelect: (id: string) => void; onCreate: (title: string, description: string) => void }) {
+function RoadbookLibraryModal({ roadbooks, activeRoadbookId, onClose, onSelect, onCreate, onDelete }: { roadbooks: Roadbook[]; activeRoadbookId: string; onClose: () => void; onSelect: (id: string) => void; onCreate: (title: string, description: string) => void; onDelete: (id: string) => void }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card library-modal"><div className="modal-head"><div><span className="eyebrow">MY ROADBOOKS</span><h2>我的路书</h2></div><button type="button" className="modal-close" onClick={onClose}>×</button></div><div className="roadbook-list">{roadbooks.map((roadbook) => <button className={`roadbook-item ${roadbook.id === activeRoadbookId ? "active" : ""}`} type="button" key={roadbook.id} onClick={() => onSelect(roadbook.id)}><span className="roadbook-icon">⌁</span><span className="roadbook-item-copy"><strong>{roadbook.title}</strong><small>{roadbook.region} · {roadbook.days.length} 天 · {roadbook.days.reduce((sum, day) => sum + day.stops.length, 0)} 个地点</small></span><span className="roadbook-item-arrow">{roadbook.id === activeRoadbookId ? "当前" : "打开 →"}</span></button>)}</div><div className="new-roadbook-form"><div className="form-title"><span>＋</span><strong>创建一条新路书</strong></div><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="路书名称，例如：滇西环线" /><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="一句话描述（可选）" /><button className="primary-button" type="button" onClick={() => onCreate(title, description)}>创建并开始编辑 <span>→</span></button></div><div className="modal-foot">每条路书独立保存，之后可以随时切换，不会覆盖其他行程。</div></div></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card library-modal"><div className="modal-head"><div><span className="eyebrow">MY ROADBOOKS</span><h2>我的路书</h2></div><button type="button" className="modal-close" onClick={onClose}>×</button></div><div className="roadbook-list">{roadbooks.map((roadbook) => <div className="roadbook-item-row" key={roadbook.id}><button className={`roadbook-item ${roadbook.id === activeRoadbookId ? "active" : ""}`} type="button" onClick={() => onSelect(roadbook.id)}><span className="roadbook-icon">⌁</span><span className="roadbook-item-copy"><strong>{roadbook.title}</strong><small>{roadbook.region} · {roadbook.days.length} 天 · {roadbook.days.reduce((sum, day) => sum + day.stops.length, 0)} 个地点</small></span><span className="roadbook-item-arrow">{roadbook.id === activeRoadbookId ? "当前" : "打开 →"}</span></button><button className="delete-roadbook-button" type="button" onClick={() => onDelete(roadbook.id)} aria-label={`删除${roadbook.title}`}>删除</button></div>)}</div><div className="new-roadbook-form"><div className="form-title"><span>＋</span><strong>创建一条新路书</strong></div><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="路书名称，例如：滇西环线" /><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="一句话描述（可选）" /><button className="primary-button" type="button" onClick={() => onCreate(title, description)}>创建并开始编辑 <span>→</span></button></div><div className="modal-foot">删除路书不会影响其他路书；至少会保留一条路书。</div></div></div>;
 }
 
 function CopyRoadbookModal({ sourceTitle, onClose, onSave }: { sourceTitle: string; onClose: () => void; onSave: (title: string) => void }) {
