@@ -619,6 +619,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .roadbook-item:hover, .roadbook-item.active { border-color: #cfd7fb; background: var(--blue-soft); }
 .roadbook-icon { background: #e8edff; color: var(--blue); }
 .new-roadbook-form input, .settings-modal input { border-color: #dfe5ec; border-radius: 9px; font-size: 12px; }
+.copy-roadbook-modal { width: min(460px, 100%); }
+.copy-roadbook-modal > p { margin: 17px 0 20px; color: #738094; font-size: 12px; line-height: 1.65; }
+.copy-roadbook-modal label { display: grid; gap: 7px; color: #566379; font-size: 11px; font-weight: 700; }
+.copy-roadbook-modal input { width: 100%; padding: 11px 12px; border: 1px solid #dfe5ec; border-radius: 9px; outline: 0; background: #f8fafc; color: var(--ink); font: inherit; }
+.copy-roadbook-modal input:focus { border-color: #aebcf5; box-shadow: 0 0 0 3px rgba(80, 108, 220, .12); }
+.copy-roadbook-modal .modal-actions { margin-top: 24px; }
 .toast { border-radius: 11px; background: #fff; color: #435067; box-shadow: 0 16px 45px rgba(20, 34, 57, .15); }
 
 @media (max-width: 1360px) {

@@ -513,6 +513,30 @@ function makeNewRoadbook(title: string, description: string): Roadbook {
   };
 }
 
+function makeCopiedRoadbook(source: Roadbook, title: string): Roadbook {
+  return {
+    ...source,
+    id: uid("roadbook"),
+    title: title.trim() || `${source.title} 副本`,
+    updated: "刚刚复制",
+    // 路段缓存以坐标为 key，因此保留地点坐标即可让副本直接复用已有的高德结果；
+    // 但编辑界面使用 day/stop id 管理状态，副本必须拥有独立的 id。
+    days: source.days.map((day) => ({
+      ...day,
+      id: uid("day"),
+      stops: day.stops.map((stop) => ({ ...stop, id: uid("stop") })),
+    })),
+  };
+}
+
+function cacheRoadbookPaths(roadbook: Roadbook, cache: RouteCache) {
+  roadbook.days.forEach((day) => {
+    if (day.stops.length < 2) return;
+    const path = combineRoutePaths(day.stops.slice(0, -1).map((stop, index) => cache.legs[legCacheKey(stop, day.stops[index + 1])]?.path));
+    if (path.length >= 2) cache.paths[routeCacheKey(day.stops)] = path;
+  });
+}
+
 function loadSavedSettings() {
   if (typeof window === "undefined") return { jsKey: "", securityCode: "", webKey: "" };
   const saved = window.localStorage.getItem("roadbook-amap-settings");
@@ -610,6 +634,7 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAddPlace, setShowAddPlace] = useState(false);
   const [showLibrary, setShowLibrary] = useState(false);
+  const [showCopyRoadbook, setShowCopyRoadbook] = useState(false);
   const [showShareManager, setShowShareManager] = useState(false);
   const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
   const [isLoadingShareLinks, setIsLoadingShareLinks] = useState(false);
@@ -1397,6 +1422,20 @@ export default function Home() {
     void commitRoadbooks(next, "新路书已创建并保存到云端");
   }
 
+  function copyRoadbook(title: string) {
+    if (readOnly) return;
+    const copied = makeCopiedRoadbook(activeRoadbook, title);
+    // 副本的坐标与原路书一致，提前把已有轨迹写回本地缓存；后续路线计算会
+    // 命中相同的坐标 key，不会为复制操作额外消耗高德 API。
+    cacheRoadbookPaths(copied, routeCacheRef.current);
+    saveRouteCache(routeCacheRef.current);
+    const next = [copied, ...roadbooks];
+    setActiveRoadbookId(copied.id);
+    setSelectedDayId(copied.days[0]?.id ?? "");
+    setShowCopyRoadbook(false);
+    void commitRoadbooks(next, "路书副本已创建并保存到云端");
+  }
+
   function exportPdf() {
     window.print();
   }
@@ -1651,7 +1690,7 @@ export default function Home() {
               <div className="title-row"><input readOnly={readOnly} aria-label="编辑当天标题" value={selectedDay.title} onChange={(event) => updateSelectedDay((day) => ({ ...day, title: event.target.value }))} />{!readOnly && <span className="edit-hint">↗</span>}</div>
               <input className="subtitle-input" readOnly={readOnly} aria-label="编辑当天副标题" value={selectedDay.subtitle} onChange={(event) => updateSelectedDay((day) => ({ ...day, subtitle: event.target.value }))} />
             </div>
-            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
+            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
           <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
@@ -1754,6 +1793,7 @@ export default function Home() {
       </div>
 
       {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} />}
+      {showCopyRoadbook && <CopyRoadbookModal sourceTitle={activeRoadbook.title} onClose={() => setShowCopyRoadbook(false)} onSave={copyRoadbook} />}
       {showShareManager && <ShareManagerModal links={shareLinks} isLoading={isLoadingShareLinks} onClose={() => setShowShareManager(false)} onRefresh={() => void refreshShareLinks()} onCopy={(link) => void copyShareLink(link)} onRevoke={(link) => void revokeShareLink(link)} />}
       {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{formatSearchResultMeta(result)}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在结合当前行程位置搜索，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">搜索会结合当天行程位置、城市和全国结果，并优先显示名称最匹配的地点。</div></div></div>}
 
@@ -1770,6 +1810,11 @@ function RoadbookLibraryModal({ roadbooks, activeRoadbookId, onClose, onSelect, 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card library-modal"><div className="modal-head"><div><span className="eyebrow">MY ROADBOOKS</span><h2>我的路书</h2></div><button type="button" className="modal-close" onClick={onClose}>×</button></div><div className="roadbook-list">{roadbooks.map((roadbook) => <button className={`roadbook-item ${roadbook.id === activeRoadbookId ? "active" : ""}`} type="button" key={roadbook.id} onClick={() => onSelect(roadbook.id)}><span className="roadbook-icon">⌁</span><span className="roadbook-item-copy"><strong>{roadbook.title}</strong><small>{roadbook.region} · {roadbook.days.length} 天 · {roadbook.days.reduce((sum, day) => sum + day.stops.length, 0)} 个地点</small></span><span className="roadbook-item-arrow">{roadbook.id === activeRoadbookId ? "当前" : "打开 →"}</span></button>)}</div><div className="new-roadbook-form"><div className="form-title"><span>＋</span><strong>创建一条新路书</strong></div><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="路书名称，例如：滇西环线" /><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="一句话描述（可选）" /><button className="primary-button" type="button" onClick={() => onCreate(title, description)}>创建并开始编辑 <span>→</span></button></div><div className="modal-foot">每条路书独立保存，之后可以随时切换，不会覆盖其他行程。</div></div></div>;
+}
+
+function CopyRoadbookModal({ sourceTitle, onClose, onSave }: { sourceTitle: string; onClose: () => void; onSave: (title: string) => void }) {
+  const [title, setTitle] = useState(`${sourceTitle} 副本`);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card copy-roadbook-modal" role="dialog" aria-modal="true" aria-labelledby="copy-roadbook-title"><div className="modal-head"><div><span className="eyebrow">COPY ROADBOOK</span><h2 id="copy-roadbook-title">复制当前路书</h2></div><button type="button" className="modal-close" onClick={onClose} aria-label="关闭">×</button></div><p>将复制所有天数、地点、备注和行程设置。路线会复用当前缓存，不会重新请求高德。</p><label>副本名称<input autoFocus value={title} maxLength={80} onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => event.key === "Enter" && onSave(title)} /></label><div className="modal-actions"><button className="ghost-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={() => onSave(title)}>保存并创建 <span>→</span></button></div></div></div>;
 }
 
 function ShareManagerModal({ links, isLoading, onClose, onRefresh, onCopy, onRevoke }: { links: ShareLink[]; isLoading: boolean; onClose: () => void; onRefresh: () => void; onCopy: (link: ShareLink) => void; onRevoke: (link: ShareLink) => void }) {
