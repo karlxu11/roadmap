@@ -431,6 +431,10 @@ function searchContextStop(day: DayPlan) {
   return [...day.stops].reverse().find((stop) => stop.area !== "点击右侧搜索添加" && !stop.name.startsWith("添加一个")) ?? day.stops.at(-1);
 }
 
+function isRoutePlaceholder(stop: Stop) {
+  return stop.area === "点击右侧搜索添加" || stop.name.startsWith("添加一个");
+}
+
 function searchCityHint(stop?: Stop) {
   if (!stop) return "";
   return stop.area.split("·")[0]?.trim() ?? "";
@@ -1020,11 +1024,12 @@ export default function Home() {
     let retryTimer: number | null = null;
     const now = Date.now();
     const initialMetrics = Object.fromEntries(selectedDay.stops.slice(0, -1).map((stop, index) => {
-      const key = legCacheKey(stop, selectedDay.stops[index + 1]);
+      const destination = selectedDay.stops[index + 1];
+      const key = legCacheKey(stop, destination);
       const cached = routeCacheRef.current.legs[key];
       const fresh = isFreshCachedLeg(cached, now);
       const retryAt = routeCacheRef.current.errors[key];
-      return [stop.id, fresh ? { status: "ready" as const, ...displayCachedLeg(cached) } : retryAt > now ? { status: "error" as const } : { status: "loading" as const }];
+      return [stop.id, isRoutePlaceholder(stop) || isRoutePlaceholder(destination) ? { status: "error" as const } : fresh ? { status: "ready" as const, ...displayCachedLeg(cached) } : retryAt > now ? { status: "error" as const } : { status: "loading" as const }];
     }));
     setLegMetrics(initialMetrics);
 
@@ -1033,7 +1038,7 @@ export default function Home() {
       destination: day.stops[index + 1],
       key: legCacheKey(stop, day.stops[index + 1]),
       isSelectedDay: day.id === selectedDay.id,
-    })));
+    })).filter(({ stop, destination }) => !isRoutePlaceholder(stop) && !isRoutePlaceholder(destination)));
     // 当前天的路线优先计算，避免首次打开或调整顺序时让大量高德请求争抢主线程。
     const targetLegs = allLegs;
     const scheduleNextRetry = () => {
@@ -1070,9 +1075,9 @@ export default function Home() {
         return [stopId, isFreshCachedLeg(cached) ? { status: "ready" as const, ...displayCachedLeg(cached) } : { status: "error" as const }];
       })) }));
     };
-    const requestMissingLegs = (legs: typeof missingLegs) => {
+    const requestMissingLegs = (legs: typeof missingLegs, concurrency = ROUTE_REQUEST_CONCURRENCY) => {
       if (!legs.length) return;
-      void mapWithConcurrency(legs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key, isSelectedDay }) => ({ stopId: stop.id, key, isSelectedDay, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, isSelectedDay) })).then(applyRouteEntries);
+      void mapWithConcurrency(legs, concurrency, async ({ stop, destination, key, isSelectedDay }) => ({ stopId: stop.id, key, isSelectedDay, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, isSelectedDay) })).then(applyRouteEntries);
     };
     const foregroundLegs = missingLegs.filter(({ isSelectedDay }) => isSelectedDay);
     const backgroundLegs = missingLegs.filter(({ isSelectedDay }) => !isSelectedDay);
@@ -1081,8 +1086,8 @@ export default function Home() {
     if (backgroundLegs.length) {
       backgroundTimer = window.setTimeout(() => {
         backgroundTimer = null;
-        if (!cancelled) requestMissingLegs(backgroundLegs);
-      }, 1200);
+        if (!cancelled) requestMissingLegs(backgroundLegs, 1);
+      }, 3000);
     }
     return () => {
       cancelled = true;
@@ -1258,8 +1263,10 @@ export default function Home() {
     const index = days.findIndex((day) => day.id === afterId);
     const source = days[index] ?? days[0];
     const inserted = makeInsertedDay(source);
-    updateActiveDays((current) => normalizeDayDates([...current.slice(0, index + 1), inserted, ...current.slice(index + 1)]));
-    setSelectedDayId(inserted.id);
+    startTransition(() => {
+      updateActiveDays((current) => normalizeDayDates([...current.slice(0, index + 1), inserted, ...current.slice(index + 1)]));
+      setSelectedDayId(inserted.id);
+    });
     flash("已插入新的一天");
   }
 
