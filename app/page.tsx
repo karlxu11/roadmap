@@ -106,7 +106,8 @@ const ROADBOOK_LIBRARY_KEY = "roadbook-library-v1";
 const LEGACY_ROADBOOK_KEY = "roadbook-days-v2";
 const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
 const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
-const ROUTE_FAILURE_RETRY_TTL = 5 * 60 * 1000;
+// 高德偶发限流或网络抖动时，短暂退避后自动补拉，避免路段永远停在“正在计算”。
+const ROUTE_FAILURE_RETRY_TTL = 15 * 1000;
 const ROUTE_REQUEST_CONCURRENCY = 4;
 const ROUTE_CACHE_PATH_MAX_POINTS = 240;
 const DEFAULT_EDITOR_WIDTH = 67;
@@ -651,6 +652,7 @@ export default function Home() {
   const [serviceAreaLegs, setServiceAreaLegs] = useState<Record<string, ServiceAreaLegState>>({});
   const [activeServiceAreaLeg, setActiveServiceAreaLeg] = useState<string | null>(null);
   const [routeCacheVersion, setRouteCacheVersion] = useState(0);
+  const [routeRetryVersion, setRouteRetryVersion] = useState(0);
   const [settings, setSettings] = useState({ jsKey: "", securityCode: "", webKey: "" });
   const [editorWidth, setEditorWidth] = useState(DEFAULT_EDITOR_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
@@ -723,6 +725,7 @@ export default function Home() {
       tolls: legs.every((leg) => typeof leg.tolls === "number") ? legs.reduce((sum, leg) => sum + (leg.tolls ?? 0), 0) : undefined,
     };
   }, [displayLegMetrics, selectedDay.stops]);
+  const selectedDayHasRouteError = !readOnly && selectedDay.stops.slice(0, -1).some((stop) => displayLegMetrics[stop.id]?.status === "error");
   const allRoadbookTolls = useMemo(() => {
     const now = Date.now();
     const cachedLegs = days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => sharedSnapshot
@@ -759,8 +762,8 @@ export default function Home() {
   }, [days, displayLegMetrics, routeCacheVersion, selectedDay, selectedDayIndex, sharedSnapshot]);
   const cumulativeTollsComplete = cumulativeTollDays.every(({ complete }) => complete);
   const cumulativeTollsAmount = cumulativeTollsComplete ? cumulativeTollDays.reduce((sum, item) => sum + (item.amount ?? 0), 0) : undefined;
-  const routeDistance = routeSummary ? formatDistance(routeSummary.distance) : readOnly ? "未记录" : mapReady ? "正在计算" : "待规划";
-  const routeDuration = routeSummary ? formatDuration(routeSummary.duration) : readOnly ? "未记录" : mapReady ? "正在计算" : "待规划";
+  const routeDistance = routeSummary ? formatDistance(routeSummary.distance) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
+  const routeDuration = routeSummary ? formatDuration(routeSummary.duration) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
   const departureStop = selectedDay.stops.find((stop) => stop.kind === "出发");
   const departureTime = departureStop ? extractClock(departureStop.duration) : "09:00";
   const stopArrivalTimes = useMemo(() => {
@@ -961,6 +964,7 @@ export default function Home() {
       return;
     }
     let cancelled = false;
+    let retryTimer: number | null = null;
     const now = Date.now();
     const initialMetrics = Object.fromEntries(selectedDay.stops.slice(0, -1).map((stop, index) => {
       const key = legCacheKey(stop, selectedDay.stops[index + 1]);
@@ -979,10 +983,20 @@ export default function Home() {
     })));
     // 左栏需要每日和全程里程，因此会补齐所有路段。每段优先读取 Worker KV 的 24 小时缓存。
     const targetLegs = allLegs;
+    const scheduleNextRetry = () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      const retryAt = Math.min(...targetLegs.map(({ key }) => routeCacheRef.current.errors[key] ?? Infinity));
+      if (!Number.isFinite(retryAt)) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (!cancelled) setRouteRetryVersion((version) => version + 1);
+      }, Math.max(0, retryAt - Date.now()));
+    };
     const missingLegs = targetLegs.filter(({ key, isSelectedDay }) => {
       const cached = routeCacheRef.current.legs[key];
       return !isFreshCachedLeg(cached, now, isSelectedDay) && (routeCacheRef.current.errors[key] ?? 0) <= now;
     });
+    scheduleNextRetry();
     void mapWithConcurrency(missingLegs, ROUTE_REQUEST_CONCURRENCY, async ({ stop, destination, key, isSelectedDay }) => ({ stopId: stop.id, key, isSelectedDay, metric: await requestRouteLeg(stop, destination, key, pendingLegsRef.current, isSelectedDay) })).then((entries) => {
       entries.forEach(({ key, metric }) => {
         if (metric) {
@@ -996,15 +1010,19 @@ export default function Home() {
         saveRouteCache(routeCacheRef.current);
         setRouteCacheVersion((version) => version + 1);
       }
+      scheduleNextRetry();
       if (!cancelled) setLegMetrics((current) => ({ ...current, ...Object.fromEntries(entries.filter(({ isSelectedDay }) => isSelectedDay).map(({ stopId, key }) => {
         const cached = routeCacheRef.current.legs[key];
         return [stopId, isFreshCachedLeg(cached) ? { status: "ready" as const, ...displayCachedLeg(cached) } : { status: "error" as const }];
       })) }));
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
   // 路线计算只依赖路线指纹；标题、备注和出发时间变化不应重新触发高德请求。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, readOnly, routePlanDependencyKey, selectedDayRouteDependencyKey, storageStatus]);
+  }, [amapLoaded, readOnly, routePlanDependencyKey, selectedDayRouteDependencyKey, routeRetryVersion, storageStatus]);
 
   function updateEditorWidth(clientX: number) {
     const workspace = workspaceRef.current;
@@ -1693,7 +1711,7 @@ export default function Home() {
             <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
-          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
+          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当天日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当天日期" onChange={(event) => updateSelectedDayDate(event.target.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中… · 查看" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
 
           <div className="stops-section">
             <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "路径、费用和时间以分享时记录为准" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
