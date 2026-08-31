@@ -21,7 +21,7 @@ test("server-renders the roadbook workspace", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>路书 · ROAM NOTE<\/title>/i);
-  assert.match(html, /2026中秋国庆新疆/);
+  assert.match(html, /五一伊犁/);
   assert.match(html, /在行程末尾添加一天/);
   assert.match(html, /把想去的地方放进来/);
   assert.match(html, /type="time"/);

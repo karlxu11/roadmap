@@ -380,10 +380,10 @@ function projectRoutePath(path: Array<[number, number]>, stops: Stop[]) {
 
 function defaultRoadbook(): Roadbook {
   return {
-    id: "roadbook-xinjiang",
-    title: "2026中秋国庆新疆",
-    description: "从深圳出发，沿着补能点一路向西进入新疆",
-    region: "深圳 → 新疆",
+    id: "roadbook-69defbdbf04061086bd0cf71",
+    title: "五一伊犁",
+    description: "从深圳出发，穿越河西走廊，游览赛里木湖、库尔德宁与那拉提草原后返程",
+    region: "深圳 → 伊犁 → 深圳",
     updated: "已从高德路书导入",
     days: initialDays,
   };
@@ -434,13 +434,19 @@ function normalizeRoadbookDates(roadbooks: Roadbook[]) {
   return roadbooks.map((roadbook) => ({ ...roadbook, days: normalizeDayDates(roadbook.days) }));
 }
 
+function ensureImportedRoadbook(roadbooks: Roadbook[]) {
+  const imported = defaultRoadbook();
+  if (roadbooks.some((roadbook) => roadbook.id === imported.id)) return { roadbooks, added: false };
+  return { roadbooks: [imported, ...roadbooks], added: true };
+}
+
 function loadRoadbooks(): Roadbook[] {
   if (typeof window === "undefined") return [defaultRoadbook()];
   const savedLibrary = window.localStorage.getItem(ROADBOOK_LIBRARY_KEY);
   if (savedLibrary) {
     try {
       const parsed = JSON.parse(savedLibrary) as Roadbook[];
-      if (Array.isArray(parsed) && parsed.length) return normalizeRoadbookDates(parsed);
+      if (Array.isArray(parsed) && parsed.length) return normalizeRoadbookDates(ensureImportedRoadbook(parsed).roadbooks);
     } catch {
       window.localStorage.removeItem(ROADBOOK_LIBRARY_KEY);
     }
@@ -484,7 +490,10 @@ async function fetchRemoteRoadbooks() {
   const response = await fetch("/api/roadbooks", { headers: { Accept: "application/json" }, cache: "no-store" });
   if (!response.ok) throw new Error(`roadbook-storage-${response.status}`);
   const payload = await response.json() as { roadbooks?: unknown };
-  return Array.isArray(payload.roadbooks) && payload.roadbooks.length ? normalizeRoadbookDates(payload.roadbooks as Roadbook[]) : null;
+  if (!Array.isArray(payload.roadbooks) || !payload.roadbooks.length) return null;
+  const normalized = normalizeRoadbookDates(payload.roadbooks as Roadbook[]);
+  const seeded = ensureImportedRoadbook(normalized);
+  return { roadbooks: seeded.roadbooks, added: seeded.added };
 }
 
 async function saveRemoteRoadbooks(roadbooks: Roadbook[]) {
@@ -838,16 +847,19 @@ export default function Home() {
       };
     }
     const localRoadbooks = loadRoadbooks();
-    fetchRemoteRoadbooks().then(async (remoteRoadbooks) => {
+    fetchRemoteRoadbooks().then(async (remotePayload) => {
       if (cancelled) return;
-      if (remoteRoadbooks) {
+      if (remotePayload) {
+        const remoteRoadbooks = remotePayload.roadbooks;
         setRoadbooks(remoteRoadbooks);
         saveRoadbooks(remoteRoadbooks);
         setActiveRoadbookId(remoteRoadbooks[0].id);
         setSelectedDayId(remoteRoadbooks[0].days[0]?.id ?? "");
         setStorageStatus("remote");
+        if (remotePayload.added) void saveRemoteRoadbooks(remoteRoadbooks);
         return;
       }
+      saveRoadbooks(localRoadbooks);
       const seeded = await saveRemoteRoadbooks(localRoadbooks);
       if (cancelled) return;
       setStorageStatus(seeded ? "remote" : "unavailable");
