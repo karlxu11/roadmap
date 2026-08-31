@@ -1161,6 +1161,11 @@ export default function Home() {
 
   function updateActiveDays(updater: (days: DayPlan[]) => DayPlan[]) {
     if (readOnly) return;
+    setRoadbooks((current) => current.map((roadbook) => roadbook.id === activeRoadbookId ? { ...roadbook, days: updater(roadbook.days) } : roadbook));
+  }
+
+  function updateActiveDaysInTransition(updater: (days: DayPlan[]) => DayPlan[]) {
+    if (readOnly) return;
     startTransition(() => {
       setRoadbooks((current) => current.map((roadbook) => roadbook.id === activeRoadbookId ? { ...roadbook, days: updater(roadbook.days) } : roadbook));
     });
@@ -1168,6 +1173,10 @@ export default function Home() {
 
   function updateSelectedDay(updater: (day: DayPlan) => DayPlan) {
     updateActiveDays((current) => current.map((day) => (day.id === selectedDayId ? updater(day) : day)));
+  }
+
+  function updateSelectedDayInTransition(updater: (day: DayPlan) => DayPlan) {
+    updateActiveDaysInTransition((current) => current.map((day) => (day.id === selectedDayId ? updater(day) : day)));
   }
 
   function updateStop(stopId: string, updater: (stop: Stop) => Stop) {
@@ -1221,7 +1230,7 @@ export default function Home() {
   }
 
   function moveDay(id: string, direction: -1 | 1) {
-    updateActiveDays((current) => {
+    updateActiveDaysInTransition((current) => {
       const index = current.findIndex((day) => day.id === id);
       const nextIndex = index + direction;
       if (index < 0 || nextIndex < 0 || nextIndex >= current.length) return current;
@@ -1233,7 +1242,7 @@ export default function Home() {
   }
 
   function moveStop(stopId: string, direction: -1 | 1) {
-    updateSelectedDay((day) => {
+    updateSelectedDayInTransition((day) => {
       const index = day.stops.findIndex((stop) => stop.id === stopId);
       const nextIndex = index + direction;
       if (index < 0 || nextIndex < 0 || nextIndex >= day.stops.length) return day;
