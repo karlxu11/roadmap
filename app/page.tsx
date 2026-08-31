@@ -105,6 +105,7 @@ declare global {
 const initialDays: DayPlan[] = importedDays as unknown as DayPlan[];
 
 const ROADBOOK_LIBRARY_KEY = "roadbook-library-v1";
+const ROADBOOK_DRAFT_META_KEY = "roadbook-library-v1-draft";
 const LEGACY_ROADBOOK_KEY = "roadbook-days-v2";
 const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
 const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
@@ -113,6 +114,7 @@ const ROUTE_FAILURE_RETRY_TTL = 15 * 1000;
 const ROUTE_REQUEST_CONCURRENCY = 4;
 const ROUTE_CACHE_PATH_MAX_POINTS = 240;
 const ROUTE_CACHE_SAVE_DELAY = 750;
+const ROADBOOK_LOCAL_SAVE_DELAY = 350;
 const BACKGROUND_ROUTE_DELAY = 4000;
 const DEFAULT_EDITOR_WIDTH = 67;
 const SEARCH_CACHE_TTL = 10 * 60 * 1000;
@@ -123,6 +125,7 @@ const SHARE_LINK_TTL = 30 * 24 * 60 * 60 * 1000;
 type CachedLeg = { distance?: number; duration?: number; tolls?: number | null; path?: Array<[number, number]>; cachedAt: number };
 type RouteCache = { legs: Record<string, CachedLeg>; paths: Record<string, Array<[number, number]>>; errors: Record<string, number> };
 type RouteApiPayload = { status?: string; info?: string; route?: { distance?: number; duration?: number; tolls?: number | null; path?: Array<[number, number]> } };
+type RoadbookDraftMeta = { dirty: boolean; updatedAt: number };
 
 // 高德偶尔会返回完整的距离/时长，但不返回 tolls。用 null 记录这种结果，
 // 否则每次刷新都会把同一路段误判为未缓存并再次请求。
@@ -498,6 +501,7 @@ function loadRoadbooks(): Roadbook[] {
       if (Array.isArray(parsed) && parsed.length) return normalizeRoadbookDates(ensureImportedRoadbook(parsed).roadbooks);
     } catch {
       window.localStorage.removeItem(ROADBOOK_LIBRARY_KEY);
+      window.localStorage.removeItem(ROADBOOK_DRAFT_META_KEY);
     }
   }
   const legacy = window.localStorage.getItem(LEGACY_ROADBOOK_KEY);
@@ -512,8 +516,28 @@ function loadRoadbooks(): Roadbook[] {
   return normalizeRoadbookDates([defaultRoadbook()]);
 }
 
-function saveRoadbooks(roadbooks: Roadbook[]) {
-  window.localStorage.setItem(ROADBOOK_LIBRARY_KEY, JSON.stringify(roadbooks));
+function loadRoadbookDraftMeta(): RoadbookDraftMeta {
+  if (typeof window === "undefined") return { dirty: false, updatedAt: 0 };
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(ROADBOOK_DRAFT_META_KEY) ?? "null") as Partial<RoadbookDraftMeta> | null;
+    return {
+      dirty: parsed?.dirty === true,
+      updatedAt: typeof parsed?.updatedAt === "number" && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : 0,
+    };
+  } catch {
+    window.localStorage.removeItem(ROADBOOK_DRAFT_META_KEY);
+    return { dirty: false, updatedAt: 0 };
+  }
+}
+
+function saveRoadbooks(roadbooks: Roadbook[], dirty = true) {
+  try {
+    window.localStorage.setItem(ROADBOOK_LIBRARY_KEY, JSON.stringify(roadbooks));
+    window.localStorage.setItem(ROADBOOK_DRAFT_META_KEY, JSON.stringify({ dirty, updatedAt: Date.now() } satisfies RoadbookDraftMeta));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function loadLocalShareLinks(): ShareLink[] {
@@ -681,7 +705,7 @@ function amapStopNavigationUrl(stop: Stop) {
 }
 
 export default function Home() {
-  const [roadbooks, setRoadbooks] = useState<Roadbook[]>(() => [defaultRoadbook()]);
+  const [roadbooks, setRoadbooksState] = useState<Roadbook[]>(() => [defaultRoadbook()]);
   const [activeRoadbookId, setActiveRoadbookId] = useState(() => defaultRoadbook().id);
   const activeRoadbook = roadbooks.find((roadbook) => roadbook.id === activeRoadbookId) ?? roadbooks[0];
   const starterTrip = activeRoadbook;
@@ -728,6 +752,10 @@ export default function Home() {
   const pendingLegsRef = useRef(new Map<string, Promise<CachedLeg | null>>());
   const pendingServiceAreasRef = useRef(new Map<string, Promise<void>>());
   const routeCacheSaveHandleRef = useRef<{ kind: "idle" | "timeout"; id: number } | null>(null);
+  const localRoadbookSaveTimerRef = useRef<number | null>(null);
+  const pendingLocalRoadbooksRef = useRef<Roadbook[] | null>(null);
+  const localDraftDirtyRef = useRef(false);
+  const localDraftRevisionRef = useRef(0);
   const placeSearchRef = useRef<AMapPlaceSearch | null>(null);
   const searchCacheRef = useRef(new Map<string, { results: SearchResult[]; cachedAt: number }>());
   const searchAbortRef = useRef<AbortController | null>(null);
@@ -846,6 +874,37 @@ export default function Home() {
   selectedDayCalendarDate.setDate(selectedDayCalendarDate.getDate() + selectedDayIndex);
   const selectedDayDateValue = formatCalendarDate(selectedDayCalendarDate);
 
+  function flushScheduledRoadbookSave() {
+    if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
+    localRoadbookSaveTimerRef.current = null;
+    const pending = pendingLocalRoadbooksRef.current;
+    pendingLocalRoadbooksRef.current = null;
+    if (pending && !saveRoadbooks(pending, true)) setStorageStatus("unavailable");
+  }
+
+  function scheduleLocalRoadbookSave(next: Roadbook[]) {
+    pendingLocalRoadbooksRef.current = next;
+    if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
+    localRoadbookSaveTimerRef.current = window.setTimeout(() => {
+      localRoadbookSaveTimerRef.current = null;
+      const pending = pendingLocalRoadbooksRef.current;
+      pendingLocalRoadbooksRef.current = null;
+      if (pending && !saveRoadbooks(pending, true)) setStorageStatus("unavailable");
+    }, ROADBOOK_LOCAL_SAVE_DELAY);
+  }
+
+  function setRoadbooks(updater: Roadbook[] | ((current: Roadbook[]) => Roadbook[])) {
+    if (readOnly) return;
+    localDraftDirtyRef.current = true;
+    localDraftRevisionRef.current += 1;
+    setStorageStatus((current) => current === "loading" ? current : "local");
+    setRoadbooksState((current) => {
+      const next = typeof updater === "function" ? updater(current) : updater;
+      scheduleLocalRoadbookSave(next);
+      return next;
+    });
+  }
+
   function flushScheduledRouteCacheSave() {
     const handle = routeCacheSaveHandleRef.current;
     if (!handle) return;
@@ -893,7 +952,7 @@ export default function Home() {
           return;
         }
         setSharedSnapshot(fromShare);
-        setRoadbooks([fromShare.roadbook]);
+        setRoadbooksState([fromShare.roadbook]);
         if (!applied) {
           setActiveRoadbookId(fromShare.roadbook.id);
           setSelectedDayId(fromShare.roadbook.days[0]?.id ?? "");
@@ -924,24 +983,46 @@ export default function Home() {
       };
     }
     const localRoadbooks = loadRoadbooks();
+    const localDraft = loadRoadbookDraftMeta();
+    localDraftDirtyRef.current = localDraft.dirty;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setRoadbooksState(localRoadbooks);
+      setActiveRoadbookId(localRoadbooks[0].id);
+      setSelectedDayId(localRoadbooks[0].days[0]?.id ?? "");
+    });
     fetchRemoteRoadbooks().then(async (remotePayload) => {
       if (cancelled) return;
       if (remotePayload) {
+        // 未点击“保存路书”的本地草稿优先于云端快照，避免刷新时丢失编辑。
+        if (localDraftDirtyRef.current) {
+          setStorageStatus("local");
+          return;
+        }
         const remoteRoadbooks = remotePayload.roadbooks;
-        setRoadbooks(remoteRoadbooks);
-        saveRoadbooks(remoteRoadbooks);
+        setRoadbooksState(remoteRoadbooks);
+        saveRoadbooks(remoteRoadbooks, false);
+        localDraftDirtyRef.current = false;
         setActiveRoadbookId(remoteRoadbooks[0].id);
         setSelectedDayId(remoteRoadbooks[0].days[0]?.id ?? "");
         setStorageStatus("remote");
         if (remotePayload.added) void saveRemoteRoadbooks(remoteRoadbooks);
         return;
       }
-      saveRoadbooks(localRoadbooks);
+      if (localDraftDirtyRef.current) {
+        setStorageStatus("local");
+        return;
+      }
+      saveRoadbooks(localRoadbooks, false);
       const seeded = await saveRemoteRoadbooks(localRoadbooks);
       if (cancelled) return;
+      if (seeded) {
+        saveRoadbooks(localRoadbooks, false);
+        localDraftDirtyRef.current = false;
+      }
       setStorageStatus(seeded ? "remote" : "unavailable");
     }).catch(() => {
-      if (!cancelled) setStorageStatus("unavailable");
+      if (!cancelled) setStorageStatus(localDraftDirtyRef.current ? "local" : "unavailable");
     });
     return () => { cancelled = true; };
   }, []);
@@ -970,10 +1051,14 @@ export default function Home() {
   }, [activeRoadbook]);
 
   useEffect(() => {
-    const handlePageHide = () => flushScheduledRouteCacheSave();
+    const handlePageHide = () => {
+      flushScheduledRoadbookSave();
+      flushScheduledRouteCacheSave();
+    };
     window.addEventListener("pagehide", handlePageHide);
     return () => {
       window.removeEventListener("pagehide", handlePageHide);
+      flushScheduledRoadbookSave();
       flushScheduledRouteCacheSave();
       markersRef.current.forEach((marker) => marker.setMap(null));
       routeLineRef.current?.setMap(null);
@@ -1627,15 +1712,27 @@ export default function Home() {
   }
 
   async function commitRoadbooks(next: Roadbook[], successMessage: string, afterRemoteSave?: () => Promise<string | null>) {
-    setRoadbooks(next);
-    saveRoadbooks(next);
+    const saveRevision = localDraftRevisionRef.current;
+    if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
+    localRoadbookSaveTimerRef.current = null;
+    pendingLocalRoadbooksRef.current = null;
+    localDraftDirtyRef.current = true;
+    setRoadbooksState(next);
+    saveRoadbooks(next, true);
     setStorageStatus("saving");
     try {
       const saved = await saveRemoteRoadbooks(next);
-      setStorageStatus(saved ? "remote" : "unavailable");
       if (!saved) {
+        setStorageStatus("unavailable");
         flash("云端保存失败，暂时保存在当前设备");
         return;
+      }
+      if (localDraftRevisionRef.current === saveRevision) {
+        saveRoadbooks(next, false);
+        localDraftDirtyRef.current = false;
+        setStorageStatus("remote");
+      } else {
+        setStorageStatus("local");
       }
       let message = successMessage;
       if (afterRemoteSave) {
@@ -1894,7 +1991,15 @@ export default function Home() {
   const mapStops = selectedDay.stops;
   const sharedRoutePath = useMemo(() => readOnly ? sharedSnapshot?.paths?.[routeCacheKey(mapStops)] ?? [] : [], [mapStops, readOnly, sharedSnapshot]);
   const sharedMapProjection = useMemo(() => projectRoutePath(sharedRoutePath, mapStops), [mapStops, sharedRoutePath]);
-  const storageStatusLabel = storageStatus === "remote" ? "已同步到云端" : storageStatus === "saving" ? "正在保存到云端" : storageStatus === "loading" ? "正在连接云端" : "云端存储未配置";
+  const storageStatusLabel = storageStatus === "remote"
+    ? "已同步到云端"
+    : storageStatus === "saving"
+      ? "正在保存到云端"
+      : storageStatus === "loading"
+        ? "正在连接云端"
+        : storageStatus === "local"
+          ? "已自动保存到本机"
+          : "云端当前不可用";
   const routeConnectionLabel = readOnly ? (mapReady ? "高德地图已接入" : "正在加载高德地图") : mapReady ? "高德路线已接入" : "示例路线预览";
 
   if (shareLoadError) {
