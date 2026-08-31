@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable jsx-a11y/no-autofocus -- the note editor opens for immediate keyboard entry. */
 
-import { startTransition, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { initialDays as importedDays } from "./roadbook-data";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
@@ -724,6 +724,8 @@ export default function Home() {
   const totalStops = useMemo(() => days.reduce((sum, day) => sum + day.stops.length, 0), [days]);
   const selectedDayRouteDependencyKey = useMemo(() => `${selectedDay.id}:${selectedDay.stops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|")}`, [selectedDay]);
   const routePlanDependencyKey = useMemo(() => days.map((day) => `${day.id}:${day.stops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|")}`).join("||"), [days]);
+  const deferredSelectedDayRouteDependencyKey = useDeferredValue(selectedDayRouteDependencyKey);
+  const deferredRoutePlanDependencyKey = useDeferredValue(routePlanDependencyKey);
   const displayLegMetrics = useMemo(() => {
     if (!sharedSnapshot) return legMetrics;
     return Object.fromEntries(Object.entries(sharedSnapshot.legs).map(([stopId, metric]) => [stopId, { status: "ready" as const, ...metric }])) as typeof legMetrics;
@@ -989,7 +991,7 @@ export default function Home() {
     };
   // 地点顺序或坐标变化时才重建标记；路线指标更新不应反复重建整张地图。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, storageStatus, selectedDayRouteDependencyKey]);
+  }, [amapLoaded, storageStatus, deferredSelectedDayRouteDependencyKey]);
 
   useEffect(() => {
     if (storageStatus === "loading" || !amapLoaded || !window.AMap || !mapRef.current) return;
@@ -1013,7 +1015,7 @@ export default function Home() {
       map.setFitView([...markersRef.current, routeLineRef.current]);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, readOnly, selectedDayRouteDependencyKey, selectedRouteCacheVersion, sharedSnapshot, storageStatus]);
+  }, [amapLoaded, readOnly, deferredSelectedDayRouteDependencyKey, selectedRouteCacheVersion, sharedSnapshot, storageStatus]);
 
   useEffect(() => {
     if (readOnly || hasShareQuery() || storageStatus === "loading" || !amapLoaded || !window.AMap) {
@@ -1096,7 +1098,7 @@ export default function Home() {
     };
   // 路线计算只依赖路线指纹；标题、备注和出发时间变化不应重新触发高德请求。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, readOnly, routePlanDependencyKey, selectedDayRouteDependencyKey, routeRetryVersion, storageStatus]);
+  }, [amapLoaded, readOnly, deferredRoutePlanDependencyKey, deferredSelectedDayRouteDependencyKey, routeRetryVersion, storageStatus]);
 
   function updateEditorWidth(clientX: number) {
     const workspace = workspaceRef.current;
