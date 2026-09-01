@@ -1157,7 +1157,9 @@ export default function Home() {
           map,
           position: [stop.lng, stop.lat],
           title: stop.name,
-          label: { content: `<span class="amap-label">${stop.mapLabel ?? index + 1}. ${stop.name}</span>`, direction: "top" },
+          label: isShareOverview
+            ? { content: `<span class="amap-overview-day">${stop.mapLabel ?? `D${index + 1}`}</span>`, direction: "top" }
+            : { content: `<span class="amap-label">${index + 1}. ${stop.name}</span>`, direction: "top" },
         }));
         markersRef.current.forEach((marker) => marker.setMap(null));
         markersRef.current = nextMarkers;
@@ -1847,9 +1849,11 @@ export default function Home() {
     return Object.fromEntries(roadbook.days.flatMap((day) => {
       if (day.stops.length < 2) return [];
       const path = combineRoutePaths(day.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, day.stops[index + 1])]?.path));
+      // 总览中不能把未计算的路线伪装成直线：这会让跨省行程看起来像断裂或走错路。
+      // 分享前会优先补齐轨迹；仍失败的天数只显示地点和缺失状态。
+      if (path.length < 2) return [];
       const key = routeCacheKey(day.stops);
-      const fallbackPath = day.stops.map((stop) => [stop.lng, stop.lat] as [number, number]);
-      return [[key, sampleRoutePath(path.length >= 2 ? path : fallbackPath)]];
+      return [[key, sampleRoutePath(path)]];
     }));
   }
 
@@ -1953,8 +1957,10 @@ export default function Home() {
     if (isPreparingShare) return;
     setIsPreparingShare(true);
     try {
-      // 分享不再等待整本路书补算完成；先生成当前缓存快照，缺失路段后台继续预热。
-      const { snapshot, missingCount } = buildShareSnapshot(activeRoadbook);
+      // 先复用本地缓存，仅为缺少轨迹的路段补拉高德路径，保证分享页不会退化为地点直连线。
+      const preparation = await prepareShareData(activeRoadbook);
+      const { snapshot } = buildShareSnapshot(activeRoadbook);
+      const missingCount = preparation.missingCount;
       let shareUrl = "";
       let shareToken = "";
       try {
@@ -1989,21 +1995,9 @@ export default function Home() {
         expiresAt: new Date(Date.now() + SHARE_LINK_TTL).toISOString(),
         storage: shareToken ? "cloud" : "browser",
       });
-      const prepareAndUpdate = async () => {
-        await prepareShareData(activeRoadbook);
-        if (!shareToken) return;
-        const updated = buildShareSnapshot(activeRoadbook).snapshot;
-        await fetch(`/api/shares?token=${encodeURIComponent(shareToken)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify(updated),
-          cache: "no-store",
-        });
-      };
-      void prepareAndUpdate().catch(() => undefined);
       try {
         await navigator.clipboard.writeText(shareUrl);
-        flash(missingCount ? `分享链接已复制，还有 ${missingCount} 条路线暂未记录` : "分享链接已复制，可直接粘贴发送");
+        flash(missingCount ? `分享链接已复制，${missingCount} 条路线暂未能获取` : "分享链接已复制，可直接粘贴发送");
       } catch {
         flash("复制失败，请检查浏览器剪贴板权限");
       }
@@ -2098,7 +2092,7 @@ export default function Home() {
               <div className="title-row"><input readOnly={readOnly} aria-label="编辑当天标题" value={selectedDay.title} onChange={(event) => updateSelectedDay((day) => ({ ...day, title: event.target.value }))} />{!readOnly && <span className="edit-hint">↗</span>}</div>
               <input className="subtitle-input" readOnly={readOnly} aria-label="编辑当天副标题" value={selectedDay.subtitle} onChange={(event) => updateSelectedDay((day) => ({ ...day, subtitle: event.target.value }))} />
             </div>
-            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "准备分享数据…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
+            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "正在补齐全程路线…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
           <div className="stats-strip"><div className="date-stat"><span className="stat-label">当日日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当日日期" onInput={(event) => updateSelectedDayDate(event.currentTarget.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中…" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
@@ -2161,10 +2155,10 @@ export default function Home() {
               <div className="map-mountain mountain-one" /><div className="map-mountain mountain-two" />
               {!mapRoutePaths.length && <div className="route-line" />}
               {mapRoutePaths.length > 0 && <svg className="snapshot-route" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={isShareOverview ? "分享时记录的全程路线" : "分享前记录的路线"}>{sharedMapProjection.lines.map((line, index) => <polyline key={`${index}-${line.slice(0, 20)}`} points={line} className={isShareOverview ? "overview-route-segment" : undefined} />)}</svg>}
-              {mapMarkerStops.map((stop, index) => { const point = mapRoutePaths.length > 0 ? sharedMapProjection.markers[index] : { x: 18 + (index * 29), y: 66 - (index * 17) }; return <div key={`${stop.id}-${index}`} className={`fallback-marker ${isShareOverview ? "overview-marker" : ""}`} style={{ left: `${point.x}%`, top: `${point.y}%` }}><span>{stop.mapLabel ?? index + 1}</span><label>{stop.name}</label></div>; })}
+              {mapMarkerStops.map((stop, index) => { const point = mapRoutePaths.length > 0 ? sharedMapProjection.markers[index] : { x: 18 + (index * 29), y: 66 - (index * 17) }; return <div key={`${stop.id}-${index}`} className={`fallback-marker ${isShareOverview ? "overview-marker" : ""}`} style={{ left: `${point.x}%`, top: `${point.y}%` }}><span>{stop.mapLabel ?? index + 1}</span>{!isShareOverview && <label>{stop.name}</label>}</div>; })}
               <div className="map-coordinates"><span>30°03′N</span><span>101°58′E</span></div>
               <div className="map-compass">N<br /><span>✦</span></div>
-              {isShareOverview && <div className="snapshot-map-badge">全程 {days.length} 天 · {mapRoutePaths.length} 段已记录路线</div>}
+              {isShareOverview && <div className="snapshot-map-badge">{mapRoutePaths.length === days.length ? `全程 ${days.length} 天 · 路线已完整记录` : `全程 ${days.length} 天 · ${days.length - mapRoutePaths.length} 天路线未记录`}</div>}
               {!settings.jsKey && !readOnly && <div className="map-message"><span className="map-message-icon">⌖</span><strong>接入高德地图，查看真实路线</strong><p>当前分享页暂时无法加载高德地图底图。</p><button type="button" onClick={() => setShowSettings(true)}>去设置 Key <span>→</span></button></div>}
             </div>
             <div className="map-host" ref={mapContainer} />

@@ -612,6 +612,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .overview-map-wrap { min-height: 620px; }
 .overview-map-wrap .snapshot-route polyline { stroke-linecap: round; stroke-linejoin: round; }
 .overview-map-wrap .snapshot-route .overview-route-segment:nth-child(even) { stroke: #627fdf; opacity: .86; }
+.amap-overview-day { display: grid; width: 28px; height: 20px; place-items: center; border: 2px solid #3559d9; border-radius: 999px; background: #fff; color: #3559d9; font: 800 10px/1 Inter, "PingFang SC", sans-serif; box-shadow: 0 3px 9px rgba(34, 54, 127, .18); }
 .overview-marker span { min-width: 29px; width: auto; padding: 0 6px; border-radius: 999px; background: var(--blue); font-size: 9px; }
 .overview-marker label { max-width: 150px; }
 .read-only-view.share-overview-view .workspace { grid-template-columns: 304px minmax(380px, .7fr) 7px minmax(600px, 1.3fr); }
