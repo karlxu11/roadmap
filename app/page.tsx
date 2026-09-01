@@ -108,6 +108,7 @@ const initialDays: DayPlan[] = importedDays as unknown as DayPlan[];
 
 const ROADBOOK_LIBRARY_KEY = "roadbook-library-v1";
 const ROADBOOK_DRAFT_META_KEY = "roadbook-library-v1-draft";
+const ACTIVE_ROADBOOK_KEY = "roadbook-last-active-v1";
 const LEGACY_ROADBOOK_KEY = "roadbook-days-v2";
 const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
 const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
@@ -541,6 +542,21 @@ function loadRoadbookDraftMeta(): RoadbookDraftMeta {
   } catch {
     window.localStorage.removeItem(ROADBOOK_DRAFT_META_KEY);
     return { dirty: false, updatedAt: 0 };
+  }
+}
+
+function preferredRoadbookId(roadbooks: Roadbook[]) {
+  if (typeof window === "undefined") return roadbooks[0]?.id ?? "";
+  const savedId = window.localStorage.getItem(ACTIVE_ROADBOOK_KEY);
+  return roadbooks.some((roadbook) => roadbook.id === savedId) ? savedId! : roadbooks[0]?.id ?? "";
+}
+
+function rememberActiveRoadbook(id: string) {
+  if (typeof window === "undefined" || !id) return;
+  try {
+    window.localStorage.setItem(ACTIVE_ROADBOOK_KEY, id);
+  } catch {
+    // 当前路书只是设备偏好；存储不可用时仍可正常编辑。
   }
 }
 
@@ -1028,9 +1044,11 @@ export default function Home() {
     localDraftDirtyRef.current = localDraft.dirty;
     queueMicrotask(() => {
       if (cancelled) return;
+      const preferredId = preferredRoadbookId(localRoadbooks);
+      const preferredRoadbook = localRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? localRoadbooks[0];
       setRoadbooksState(localRoadbooks);
-      setActiveRoadbookId(localRoadbooks[0].id);
-      setSelectedDayId(localRoadbooks[0].days[0]?.id ?? "");
+      setActiveRoadbookId(preferredRoadbook.id);
+      setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
     });
     fetchRemoteRoadbooks().then(async (remotePayload) => {
       if (cancelled) return;
@@ -1041,11 +1059,13 @@ export default function Home() {
           return;
         }
         const remoteRoadbooks = remotePayload.roadbooks;
+        const preferredId = preferredRoadbookId(remoteRoadbooks);
+        const preferredRoadbook = remoteRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? remoteRoadbooks[0];
         setRoadbooksState(remoteRoadbooks);
         saveRoadbooks(remoteRoadbooks, false);
         localDraftDirtyRef.current = false;
-        setActiveRoadbookId(remoteRoadbooks[0].id);
-        setSelectedDayId(remoteRoadbooks[0].days[0]?.id ?? "");
+        setActiveRoadbookId(preferredRoadbook.id);
+        setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
         setStorageStatus("remote");
         if (remotePayload.added) void saveRemoteRoadbooks(remoteRoadbooks);
         return;
@@ -1815,6 +1835,7 @@ export default function Home() {
     const target = roadbooks.find((roadbook) => roadbook.id === id);
     if (!target) return;
     setActiveRoadbookId(id);
+    rememberActiveRoadbook(id);
     setSelectedDayId(target.days[0]?.id ?? "");
     setShowLibrary(false);
     flash(`已切换到「${target.title}」`);
@@ -1824,6 +1845,7 @@ export default function Home() {
     const created = makeNewRoadbook(title, description);
     const next = [created, ...roadbooks];
     setActiveRoadbookId(created.id);
+    rememberActiveRoadbook(created.id);
     setSelectedDayId(created.days[0].id);
     setShowLibrary(false);
     void commitRoadbooks(next, "新路书已创建并保存到云端");
@@ -1841,6 +1863,7 @@ export default function Home() {
     if (id === activeRoadbookId) {
       const replacement = next[0];
       setActiveRoadbookId(replacement.id);
+      rememberActiveRoadbook(replacement.id);
       setSelectedDayId(replacement.days[0]?.id ?? "");
     }
     void commitRoadbooks(next, `「${target.title}」已删除并同步到云端`);
@@ -1855,6 +1878,7 @@ export default function Home() {
     saveRouteCache(routeCacheRef.current);
     const next = [copied, ...roadbooks];
     setActiveRoadbookId(copied.id);
+    rememberActiveRoadbook(copied.id);
     setSelectedDayId(copied.days[0]?.id ?? "");
     setShowCopyRoadbook(false);
     void commitRoadbooks(next, "路书副本已创建并保存到云端");
