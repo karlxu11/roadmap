@@ -360,9 +360,15 @@ function expectedSharePathCount(roadbook: Roadbook) {
   return roadbook.days.filter((day) => day.stops.length >= 2).length;
 }
 
+function hasDetailedSharePath(path: Array<[number, number]> | undefined, stops: Stop[]) {
+  // 地点数量相同的路径是早期分享快照的直连兜底，不是真实的道路几何；
+  // 真实高德路线至少会比途经点多一个折点。
+  return Boolean(path && path.length > Math.max(stops.length, 2));
+}
+
 function isCompleteShareSnapshot(snapshot: SharedSnapshot) {
   return Object.keys(snapshot.legs).length >= expectedShareLegCount(snapshot.roadbook)
-    && Object.keys(snapshot.paths ?? {}).length >= expectedSharePathCount(snapshot.roadbook);
+    && snapshot.roadbook.days.filter((day) => day.stops.length >= 2).every((day) => hasDetailedSharePath(snapshot.paths?.[routeCacheKey(day.stops)], day.stops));
 }
 
 function projectMapPoint(point: [number, number], points: Array<[number, number]>) {
@@ -783,8 +789,12 @@ export default function Home() {
   const mapMarkerStops: MapMarkerStop[] = isShareOverview ? overviewMapMarkers : selectedDay.stops;
   const mapRoutePaths = useMemo(() => {
     if (!readOnly || !sharedSnapshot) return [] as Array<Array<[number, number]>>;
-    if (isShareOverview) return days.map((day) => sharedSnapshot.paths?.[routeCacheKey(day.stops)] ?? []).filter((path) => path.length >= 2);
-    return [sharedSnapshot.paths?.[routeCacheKey(selectedDay.stops)] ?? []].filter((path) => path.length >= 2);
+    if (isShareOverview) return days.flatMap((day) => {
+      const path = sharedSnapshot.paths?.[routeCacheKey(day.stops)];
+      return hasDetailedSharePath(path, day.stops) ? [path] : [];
+    });
+    const path = sharedSnapshot.paths?.[routeCacheKey(selectedDay.stops)];
+    return hasDetailedSharePath(path, selectedDay.stops) ? [path] : [];
   }, [days, isShareOverview, readOnly, selectedDay.stops, sharedSnapshot]);
   const sharedMapProjection = useMemo(() => projectRoutePaths(mapRoutePaths, mapMarkerStops, mapStops), [mapMarkerStops, mapRoutePaths, mapStops]);
   const mapMarkerDependencyKey = useMemo(() => mapMarkerStops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|"), [mapMarkerStops]);

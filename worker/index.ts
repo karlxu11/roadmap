@@ -172,23 +172,18 @@ function shareRouteKey(stops: ShareStop[]) {
   return stops.map((stop) => `${Number(stop.lng).toFixed(6)},${Number(stop.lat).toFixed(6)}`).join("|");
 }
 
+function hasDetailedSharePath(path: Array<[number, number]> | undefined, stops: ShareStop[]) {
+  // 旧分享中用地点直连作为临时占位；它的点数与地点数相等，不能被当作真实路径。
+  return Boolean(path && path.length > Math.max(stops.length, 2));
+}
+
 async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnapshot) {
   if (!env.ROADBOOK_KV) return;
   const snapshot = JSON.parse(JSON.stringify(initial)) as ShareSnapshot;
   const daysNeedingPath = snapshot.roadbook.days.filter((day) => {
     const stops = day.stops ?? [];
-    return stops.length >= 2 && !snapshot.paths?.[shareRouteKey(stops)];
+    return stops.length >= 2 && !hasDetailedSharePath(snapshot.paths?.[shareRouteKey(stops)], stops);
   });
-  if (daysNeedingPath.length) {
-    snapshot.paths = {
-      ...(snapshot.paths ?? {}),
-      ...Object.fromEntries(daysNeedingPath.map((day) => [
-        shareRouteKey(day.stops ?? []),
-        (day.stops ?? []).map((stop) => [Number(stop.lng), Number(stop.lat)] as [number, number]),
-      ])),
-    };
-    await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
-  }
   const tasks = snapshot.roadbook.days.flatMap((day) => (day.stops ?? []).slice(0, -1).flatMap((from, index) => {
     const to = day.stops?.[index + 1];
     if (!from.id || !to || typeof from.lng !== "number" || typeof from.lat !== "number" || typeof to.lng !== "number" || typeof to.lat !== "number") return [];
@@ -212,12 +207,14 @@ async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnaps
   });
   snapshot.roadbook.days.forEach((day) => {
     const stops = day.stops ?? [];
-    const path = stops.slice(0, -1).flatMap((stop, index) => {
+    const segments = stops.slice(0, -1).map((stop) => {
       const route = routeByStopId.get(stop.id ?? "");
-      const points = route?.route.path ?? [];
-      return index === 0 ? points : points.slice(1);
+      return route?.route.path ?? [];
     });
-    if (path.length >= 2) {
+    // 一天里任意一段尚未返回时，不能把剩余片段拼成“完整”路线；
+    // 留空以便分享页继续轮询，直到整天的真实轨迹都齐全。
+    if (segments.length === stops.length - 1 && segments.every((segment) => segment.length >= 2)) {
+      const path = segments.flatMap((segment, index) => index === 0 ? segment : segment.slice(1));
       snapshot.paths = { ...(snapshot.paths ?? {}), [shareRouteKey(stops)]: path.slice(0, 500) };
     }
   });
