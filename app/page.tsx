@@ -361,9 +361,14 @@ function expectedSharePathCount(roadbook: Roadbook) {
 }
 
 function hasDetailedSharePath(path: Array<[number, number]> | undefined, stops: Stop[]) {
-  // 地点数量相同的路径是早期分享快照的直连兜底，不是真实的道路几何；
-  // 真实高德路线至少会比途经点多一个折点。
-  return Boolean(path && path.length > Math.max(stops.length, 2));
+  // 地点数量相同的路径是早期分享快照的直连兜底；旧版本还会把
+  // 整天的长路线截断在前 500 个点。两者都等待后台补齐后再绘制。
+  const destination = stops.at(-1);
+  const finalPoint = path?.at(-1);
+  if (!path || path.length <= Math.max(stops.length, 2) || !destination || !finalPoint) return false;
+  const lngDelta = (finalPoint[0] - destination.lng) * Math.cos(destination.lat * Math.PI / 180);
+  const latDelta = finalPoint[1] - destination.lat;
+  return Math.hypot(lngDelta, latDelta) < 0.03;
 }
 
 function isCompleteShareSnapshot(snapshot: SharedSnapshot) {
@@ -2059,7 +2064,7 @@ export default function Home() {
         </div>
       </header>
 
-      <div ref={workspaceRef} className="workspace" style={{ "--editor-track": `${editorWidth}fr`, "--map-track": `${100 - editorWidth}fr` } as CSSProperties}>
+      <div ref={workspaceRef} className={`workspace ${isShareOverview ? "share-overview-workspace" : ""}`} style={{ "--editor-track": `${editorWidth}fr`, "--map-track": `${100 - editorWidth}fr` } as CSSProperties}>
         <aside className="sidebar">
           <div className="sidebar-intro">
             <div className="eyebrow">MY ROADBOOK / {String(roadbooks.findIndex((roadbook) => roadbook.id === activeRoadbookId) + 1).padStart(2, "0")}</div>
@@ -2099,6 +2104,7 @@ export default function Home() {
           {!readOnly && <button className="add-day-button" type="button" onClick={() => insertDay(days.at(-1)?.id)}><span>＋</span> 在行程末尾添加一天</button>}
         </aside>
 
+        {!isShareOverview && <>
         <section className="editor-pane">
           <div className="editor-head">
             <div>
@@ -2159,6 +2165,7 @@ export default function Home() {
         </section>
 
         <div className={`split-divider ${isResizing ? "dragging" : ""}`} role="separator" aria-orientation="vertical" aria-label="调整编辑区和地图宽度" aria-valuemin={32} aria-valuemax={68} aria-valuenow={Math.round(editorWidth)} onPointerDown={startResize} onPointerMove={(event) => isResizing && updateEditorWidth(event.clientX)} onPointerUp={finishResize} onPointerCancel={finishResize}><span>⋮</span></div>
+        </>}
 
         <section className="map-panel">
           <div className="map-topbar"><div><span className="map-label">{isShareOverview ? "ROADBOOK OVERVIEW" : "LIVE MAP / AMAP"}</span><strong>{isShareOverview ? "全程路线总览" : selectedDay.title}</strong></div>{!readOnly && <button className="map-control" type="button" onClick={() => setShowSettings(true)}>{settings.jsKey ? "已连接" : "连接高德"} <span>↗</span></button>}</div>

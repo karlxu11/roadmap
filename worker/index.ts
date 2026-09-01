@@ -173,8 +173,16 @@ function shareRouteKey(stops: ShareStop[]) {
 }
 
 function hasDetailedSharePath(path: Array<[number, number]> | undefined, stops: ShareStop[]) {
-  // 旧分享中用地点直连作为临时占位；它的点数与地点数相等，不能被当作真实路径。
-  return Boolean(path && path.length > Math.max(stops.length, 2));
+  // 旧分享中用地点直连作为临时占位；另一种旧数据会把整天的轨迹
+  // 直接截断为前 500 个点。两者都不能当作完整路线。
+  const destination = stops.at(-1);
+  const finalPoint = path?.at(-1);
+  if (!path || path.length <= Math.max(stops.length, 2) || !destination || !finalPoint
+    || typeof destination.lng !== "number" || typeof destination.lat !== "number") return false;
+  const lngDelta = (finalPoint[0] - destination.lng) * Math.cos(destination.lat * Math.PI / 180);
+  const latDelta = finalPoint[1] - destination.lat;
+  // 约 3.3 公里。高德路线的终点应远小于此误差；超过说明轨迹只保存了前半段。
+  return Math.hypot(lngDelta, latDelta) < 0.03;
 }
 
 async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnapshot) {
@@ -215,7 +223,9 @@ async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnaps
     // 留空以便分享页继续轮询，直到整天的真实轨迹都齐全。
     if (segments.length === stops.length - 1 && segments.every((segment) => segment.length >= 2)) {
       const path = segments.flatMap((segment, index) => index === 0 ? segment : segment.slice(1));
-      snapshot.paths = { ...(snapshot.paths ?? {}), [shareRouteKey(stops)]: path.slice(0, 500) };
+      // 必须从全程均匀取样，不能只保留起点附近的前 500 个点，
+      // 否则长途日程在总览上会显示成一小截断线。
+      snapshot.paths = { ...(snapshot.paths ?? {}), [shareRouteKey(stops)]: samplePolyline(path, AMAP_ROUTE_MAX_POINTS) };
     }
   });
   await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });

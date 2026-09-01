@@ -43,6 +43,8 @@ button { cursor: pointer; }
 .icon-button { width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 50%; font-size: 16px; }
 .avatar { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; background: #e5b99d; color: #fff; font-size: 12px; font-weight: 800; }
 .workspace { display: grid; grid-template-columns: 285px minmax(410px, var(--editor-track, 1.05fr)) 8px minmax(420px, var(--map-track, .95fr)); min-height: calc(100vh - 78px); }
+.workspace.share-overview-workspace { grid-template-columns: 285px minmax(0, 1fr); }
+.share-overview-workspace .map-panel { min-width: 0; }
 .split-divider { position: relative; z-index: 5; display: grid; place-items: center; border: 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); background: #f5f5ef; color: #a6aea4; cursor: col-resize; touch-action: none; user-select: none; }
 .split-divider::before { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: transparent; transform: translateX(-50%); transition: background .2s; }
 .split-divider:hover::before, .split-divider.dragging::before { background: var(--orange); }
@@ -615,16 +617,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .amap-overview-day { display: grid; width: 28px; height: 20px; place-items: center; border: 2px solid #3559d9; border-radius: 999px; background: #fff; color: #3559d9; font: 800 10px/1 Inter, "PingFang SC", sans-serif; box-shadow: 0 3px 9px rgba(34, 54, 127, .18); }
 .overview-marker span { min-width: 29px; width: auto; padding: 0 6px; border-radius: 999px; background: var(--blue); font-size: 9px; }
 .overview-marker label { max-width: 150px; }
-.read-only-view.share-overview-view .workspace { grid-template-columns: 304px minmax(380px, .7fr) 7px minmax(600px, 1.3fr); }
+.read-only-view.share-overview-view .workspace { grid-template-columns: 304px minmax(0, 1fr); }
 
 @media (max-width: 1120px) {
-  .read-only-view.share-overview-view .workspace { grid-template-columns: 270px minmax(430px, 1fr); }
-  .read-only-view.share-overview-view .map-panel { grid-column: 1 / -1; display: flex; }
+  .read-only-view.share-overview-view .workspace { grid-template-columns: 270px minmax(0, 1fr); }
+  .read-only-view.share-overview-view .map-panel { grid-column: auto; display: block; }
 }
 
 @media (max-width: 760px) {
   .share-overview-button { width: calc(100% - 10px); margin: 0 5px 14px; }
-  .read-only-view.share-overview-view .map-panel { display: flex; min-height: 410px; border-top: 1px solid #dfe5eb; }
+  .read-only-view.share-overview-view .map-panel { display: block; min-height: 410px; border-top: 1px solid #dfe5eb; }
   .read-only-view.share-overview-view .overview-map-wrap { min-height: 340px; }
   .read-only-view.share-overview-view .map-bottom { min-height: 56px; }
   .overview-marker label { max-width: 84px; }
