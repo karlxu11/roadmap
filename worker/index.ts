@@ -58,7 +58,7 @@ type ShareSnapshot = {
   paths?: Record<string, Array<[number, number]>>;
   createdAt: string;
 };
-type ShareLinkRecord = { token: string; roadbookId: string; roadbookTitle: string; createdAt: string; expiresAt: string };
+type ShareLinkRecord = { token: string; roadbookId: string; roadbookTitle: string; createdAt: string; expiresAt: string; permanent?: boolean };
 type AMapSearchPayload = { status?: string; info?: string; pois?: unknown[]; [key: string]: unknown };
 function normalizeCoordinate(value: string | null) {
   if (!value) return null;
@@ -379,8 +379,14 @@ const worker = {
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "invalid_snapshot" }, { status: 400 });
       const existing = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`);
       if (existing === null) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
-      await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: SHARE_LINK_TTL });
       const index = await readShareIndex(env);
+      const existingLink = index.find((link) => link.token === token);
+      // 固定分享链接由索引中的 permanent 标记控制；普通分享仍保持 30 天失效策略。
+      await env.ROADBOOK_KV.put(
+        `${SHARE_STORAGE_PREFIX}${token}`,
+        JSON.stringify(snapshot),
+        existingLink?.permanent ? undefined : { expirationTtl: SHARE_LINK_TTL },
+      );
       await writeShareIndex(env, index.map((link) => link.token === token ? { ...link, roadbookId: snapshot.roadbook.id ?? link.roadbookId, roadbookTitle: snapshot.roadbook.title ?? link.roadbookTitle } : link));
       ctx.waitUntil(prepareShareSnapshot(env, token, snapshot).catch(() => undefined));
       return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });

@@ -54,6 +54,7 @@ type ShareLink = {
   roadbookTitle: string;
   createdAt: string;
   expiresAt: string;
+  permanent?: boolean;
   storage: "cloud" | "browser";
 };
 
@@ -1935,12 +1936,12 @@ export default function Home() {
   async function syncCloudShareSnapshots(roadbook: Roadbook) {
     const listResponse = await fetch("/api/shares", { headers: { Accept: "application/json" }, cache: "no-store" });
     if (!listResponse.ok) return null;
-    const payload = await listResponse.json() as { links?: Array<{ token?: string; roadbookId?: string; expiresAt?: string }> };
+    const payload = await listResponse.json() as { links?: Array<{ token?: string; roadbookId?: string; expiresAt?: string; permanent?: boolean }> };
     const now = Date.now();
     const links = (payload.links ?? []).filter((link): link is { token: string; roadbookId?: string; expiresAt?: string } => Boolean(
       link.token
       && link.roadbookId === roadbook.id
-      && (!link.expiresAt || new Date(link.expiresAt).getTime() > now),
+      && (link.permanent || !link.expiresAt || new Date(link.expiresAt).getTime() > now),
     ));
     if (!links.length) return null;
 
@@ -2248,7 +2249,7 @@ function CopyRoadbookModal({ sourceTitle, onClose, onSave }: { sourceTitle: stri
 
 function ShareManagerModal({ links, isLoading, onClose, onRefresh, onCopy, onRevoke }: { links: ShareLink[]; isLoading: boolean; onClose: () => void; onRefresh: () => void; onCopy: (link: ShareLink) => void; onRevoke: (link: ShareLink) => void }) {
   const [now] = useState(() => Date.now());
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card share-manager-modal" role="dialog" aria-modal="true" aria-labelledby="share-manager-title"><div className="modal-head"><div><span className="eyebrow">SHARE LINKS</span><h2 id="share-manager-title">分享管理</h2></div><div className="share-manager-head-actions"><button className="refresh-share-button" type="button" onClick={onRefresh} aria-label="刷新分享链接">↻</button><button type="button" className="modal-close" onClick={onClose}>×</button></div></div><p className="share-manager-lead">管理已经发出去的路书链接。云端链接可随时失效，默认有效期 30 天。</p><div className="share-link-list">{isLoading && !links.length ? <div className="share-manager-empty"><span>…</span><p>正在读取分享记录</p></div> : links.length ? links.map((link) => { const expired = new Date(link.expiresAt).getTime() <= now; return <div className={`share-link-item ${expired ? "expired" : ""}`} key={link.token ?? link.url}><div className="share-link-icon">↗</div><div className="share-link-copy"><strong>{link.roadbookTitle}</strong><small>{link.storage === "cloud" ? "云端链接" : "当前设备链接"} · 创建于 {new Date(link.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}</small><span>{expired ? "已过期" : `有效至 ${new Date(link.expiresAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`}</span></div><div className="share-link-actions"><button type="button" onClick={() => onCopy(link)}>复制</button><button className={link.storage === "cloud" && !expired ? "danger" : "muted"} type="button" onClick={() => onRevoke(link)}>{link.storage === "cloud" && !expired ? "失效" : "移除"}</button></div></div>; }) : <div className="share-manager-empty"><span>↗</span><p>还没有创建过分享链接</p><small>在路书编辑页点击“分享路书”后，链接会出现在这里。</small></div>}</div><div className="modal-foot">当前设备链接是未配置 KV 时的本地备用方案，只能从这里移除记录；部署 KV 后可获得真正的撤销能力。</div></div></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card share-manager-modal" role="dialog" aria-modal="true" aria-labelledby="share-manager-title"><div className="modal-head"><div><span className="eyebrow">SHARE LINKS</span><h2 id="share-manager-title">分享管理</h2></div><div className="share-manager-head-actions"><button className="refresh-share-button" type="button" onClick={onRefresh} aria-label="刷新分享链接">↻</button><button type="button" className="modal-close" onClick={onClose}>×</button></div></div><p className="share-manager-lead">管理已经发出去的路书链接。云端链接默认有效期 30 天。</p><div className="share-link-list">{isLoading && !links.length ? <div className="share-manager-empty"><span>…</span><p>正在读取分享记录</p></div> : links.length ? links.map((link) => { const expired = !link.permanent && new Date(link.expiresAt).getTime() <= now; return <div className={`share-link-item ${expired ? "expired" : ""}`} key={link.token ?? link.url}><div className="share-link-icon">↗</div><div className="share-link-copy"><strong>{link.roadbookTitle}</strong><small>{link.storage === "cloud" ? "云端链接" : "当前设备链接"} · 创建于 {new Date(link.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}</small><span>{link.permanent ? "长期有效" : expired ? "已过期" : `有效至 ${new Date(link.expiresAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`}</span></div><div className="share-link-actions"><button type="button" onClick={() => onCopy(link)}>复制</button><button className={link.storage === "cloud" && !expired ? "danger" : "muted"} type="button" onClick={() => onRevoke(link)}>{link.storage === "cloud" && !expired ? "失效" : "移除"}</button></div></div>; }) : <div className="share-manager-empty"><span>↗</span><p>还没有创建过分享链接</p><small>在路书编辑页点击“分享路书”后，链接会出现在这里。</small></div>}</div><div className="modal-foot">当前设备链接是未配置 KV 时的本地备用方案，只能从这里移除记录；部署 KV 后可获得真正的撤销能力。</div></div></div>;
 }
 
 function SettingsModal({ settings, onClose, onSave }: { settings: { jsKey: string; securityCode: string; webKey: string }; onClose: () => void; onSave: (settings: { jsKey: string; securityCode: string; webKey: string }) => void }) {
