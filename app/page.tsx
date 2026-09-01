@@ -19,6 +19,7 @@ type Stop = {
   duration: string;
   note?: string;
 };
+type MapMarkerStop = Stop & { mapLabel?: string };
 
 type DayPlan = {
   id: string;
@@ -379,18 +380,19 @@ function projectMapPoint(point: [number, number], points: Array<[number, number]
   };
 }
 
-function projectRoutePath(path: Array<[number, number]>, stops: Stop[]) {
-  const points = [...path, ...stops.map((stop) => [stop.lng, stop.lat] as [number, number])];
-  if (points.length < 2) return { line: "", markers: [] as Array<{ x: number; y: number }> };
+function projectRoutePaths(paths: Array<Array<[number, number]>>, markerStops: Stop[], boundaryStops = markerStops) {
+  const points = [...paths.flat(), ...boundaryStops.map((stop) => [stop.lng, stop.lat] as [number, number])];
+  if (points.length < 2) return { lines: [] as string[], markers: [] as Array<{ x: number; y: number }> };
   const maxPoints = 280;
-  const step = Math.max(1, Math.ceil(path.length / maxPoints));
-  const sampledPath = path.filter((_, index) => index % step === 0 || index === path.length - 1);
   return {
-    line: sampledPath.map((point) => {
-      const projected = projectMapPoint(point, points);
-      return `${projected.x},${projected.y}`;
-    }).join(" "),
-    markers: stops.map((stop) => projectMapPoint([stop.lng, stop.lat], points)),
+    lines: paths.map((path) => {
+      const step = Math.max(1, Math.ceil(path.length / maxPoints));
+      return path.filter((_, index) => index % step === 0 || index === path.length - 1).map((point) => {
+        const projected = projectMapPoint(point, points);
+        return `${projected.x},${projected.y}`;
+      }).join(" ");
+    }),
+    markers: markerStops.map((stop) => projectMapPoint([stop.lng, stop.lat], points)),
   };
 }
 
@@ -713,6 +715,7 @@ export default function Home() {
   const [sharedSnapshot, setSharedSnapshot] = useState<SharedSnapshot | null>(null);
   const [shareLoadError, setShareLoadError] = useState(false);
   const readOnly = Boolean(sharedSnapshot);
+  const [shareMapMode, setShareMapMode] = useState<"overview" | "day">("overview");
   const [selectedDayId, setSelectedDayId] = useState(() => defaultRoadbook().days[0].id);
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -748,6 +751,7 @@ export default function Home() {
   const mapRef = useRef<AMapMap | null>(null);
   const markersRef = useRef<AMapMarker[]>([]);
   const routeLineRef = useRef<AMapPolyline | null>(null);
+  const overviewRouteLinesRef = useRef<AMapPolyline[]>([]);
   const routeCacheRef = useRef<RouteCache>({ legs: {}, paths: {}, errors: {} });
   const pendingLegsRef = useRef(new Map<string, Promise<CachedLeg | null>>());
   const pendingServiceAreasRef = useRef(new Map<string, Promise<void>>());
@@ -764,6 +768,27 @@ export default function Home() {
 
   const selectedDay = days.find((day) => day.id === selectedDayId) ?? days[0];
   const selectedDayIndex = Math.max(days.findIndex((day) => day.id === selectedDayId), 0);
+  const isShareOverview = readOnly && shareMapMode === "overview";
+  const overviewStops = useMemo(() => days.flatMap((day) => day.stops), [days]);
+  const overviewMapMarkers = useMemo(() => days.flatMap((day, index) => {
+    const departure = day.stops[0];
+    const finalStop = day.stops.at(-1);
+    if (!departure) return [];
+    const start = { ...departure, mapLabel: `D${index + 1}` };
+    return index === days.length - 1 && finalStop && finalStop.id !== departure.id
+      ? [start, { ...finalStop, mapLabel: "终点" }]
+      : [start];
+  }), [days]);
+  const mapStops = isShareOverview ? overviewStops : selectedDay.stops;
+  const mapMarkerStops: MapMarkerStop[] = isShareOverview ? overviewMapMarkers : selectedDay.stops;
+  const mapRoutePaths = useMemo(() => {
+    if (!readOnly || !sharedSnapshot) return [] as Array<Array<[number, number]>>;
+    if (isShareOverview) return days.map((day) => sharedSnapshot.paths?.[routeCacheKey(day.stops)] ?? []).filter((path) => path.length >= 2);
+    return [sharedSnapshot.paths?.[routeCacheKey(selectedDay.stops)] ?? []].filter((path) => path.length >= 2);
+  }, [days, isShareOverview, readOnly, selectedDay.stops, sharedSnapshot]);
+  const sharedMapProjection = useMemo(() => projectRoutePaths(mapRoutePaths, mapMarkerStops, mapStops), [mapMarkerStops, mapRoutePaths, mapStops]);
+  const mapMarkerDependencyKey = useMemo(() => mapMarkerStops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|"), [mapMarkerStops]);
+  const deferredMapMarkerDependencyKey = useDeferredValue(mapMarkerDependencyKey);
   const totalStops = useMemo(() => days.reduce((sum, day) => sum + day.stops.length, 0), [days]);
   const selectedDayRouteDependencyKey = useMemo(() => `${selectedDay.id}:${selectedDay.stops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|")}`, [selectedDay]);
   const routePlanDependencyKey = useMemo(() => days.map((day) => `${day.id}:${day.stops.map((stop) => `${stop.id}:${stop.lng.toFixed(6)},${stop.lat.toFixed(6)}`).join("|")}`).join("||"), [days]);
@@ -1128,11 +1153,11 @@ export default function Home() {
         }
         const map = mapRef.current;
         if (!map) throw new Error("AMap.Map 未创建");
-        const nextMarkers = selectedDay.stops.map((stop, index) => new AMap.Marker({
+        const nextMarkers = mapMarkerStops.map((stop, index) => new AMap.Marker({
           map,
           position: [stop.lng, stop.lat],
           title: stop.name,
-          label: { content: `<span class="amap-label">${index + 1}. ${stop.name}</span>`, direction: "top" },
+          label: { content: `<span class="amap-label">${stop.mapLabel ?? index + 1}. ${stop.name}</span>`, direction: "top" },
         }));
         markersRef.current.forEach((marker) => marker.setMap(null));
         markersRef.current = nextMarkers;
@@ -1146,17 +1171,16 @@ export default function Home() {
     return () => window.cancelAnimationFrame(frame);
   // 地点顺序或坐标变化时才重建标记；路线指标更新不应反复重建整张地图。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, storageStatus, deferredSelectedDayRouteDependencyKey]);
+  }, [amapLoaded, storageStatus, deferredMapMarkerDependencyKey]);
 
   useEffect(() => {
     if (storageStatus === "loading" || !amapLoaded || !window.AMap || !mapRef.current) return;
     const map = mapRef.current;
     const routeKey = routeCacheKey(selectedDay.stops);
-    const sharedPath = readOnly ? sharedSnapshot?.paths?.[routeKey] ?? [] : [];
     const combinedPath = selectedDay.stops.length >= 2
       ? combineRoutePaths(selectedDay.stops.slice(0, -1).map((stop, index) => routeCacheRef.current.legs[legCacheKey(stop, selectedDay.stops[index + 1])]?.path))
       : [];
-    const cachedPath = sharedPath.length >= 2 ? sharedPath : combinedPath;
+    const cachedPath = !readOnly ? combinedPath : mapRoutePaths[0] ?? [];
     if (!readOnly) {
       if (combinedPath.length >= 2) routeCacheRef.current.paths[routeKey] = combinedPath;
       else delete routeCacheRef.current.paths[routeKey];
@@ -1165,7 +1189,16 @@ export default function Home() {
     const frame = window.requestAnimationFrame(() => {
       routeLineRef.current?.setMap(null);
       routeLineRef.current = null;
-      if (cachedPath.length >= 2) {
+      overviewRouteLinesRef.current.forEach((line) => line.setMap(null));
+      overviewRouteLinesRef.current = [];
+      if (isShareOverview) {
+        overviewRouteLinesRef.current = mapRoutePaths.map((path, index) => {
+          const line = new window.AMap!.Polyline({ path, strokeColor: index % 2 ? "#5a78df" : "#3559d9", strokeWeight: 5, strokeOpacity: 0.78, lineJoin: "round" });
+          line.setMap(map);
+          return line;
+        });
+        if (overviewRouteLinesRef.current.length) map.setFitView([...markersRef.current, ...overviewRouteLinesRef.current]);
+      } else if (cachedPath.length >= 2) {
         routeLineRef.current = new window.AMap!.Polyline({ path: cachedPath, strokeColor: "#dc6b3f", strokeWeight: 5, strokeOpacity: 0.82, lineJoin: "round" });
         routeLineRef.current.setMap(map);
         map.setFitView([...markersRef.current, routeLineRef.current]);
@@ -1173,7 +1206,7 @@ export default function Home() {
     });
     return () => window.cancelAnimationFrame(frame);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, readOnly, deferredSelectedDayRouteDependencyKey, selectedRouteCacheVersion, sharedSnapshot, storageStatus]);
+  }, [amapLoaded, isShareOverview, readOnly, deferredRoutePlanDependencyKey, deferredSelectedDayRouteDependencyKey, mapRoutePaths, selectedRouteCacheVersion, storageStatus]);
 
   useEffect(() => {
     if (readOnly || hasShareQuery() || storageStatus === "loading") {
@@ -1988,9 +2021,6 @@ export default function Home() {
     flash("高德地图配置已保存");
   }
 
-  const mapStops = selectedDay.stops;
-  const sharedRoutePath = useMemo(() => readOnly ? sharedSnapshot?.paths?.[routeCacheKey(mapStops)] ?? [] : [], [mapStops, readOnly, sharedSnapshot]);
-  const sharedMapProjection = useMemo(() => projectRoutePath(sharedRoutePath, mapStops), [mapStops, sharedRoutePath]);
   const storageStatusLabel = storageStatus === "remote"
     ? "已同步到云端"
     : storageStatus === "saving"
@@ -2007,7 +2037,7 @@ export default function Home() {
   }
 
   return (
-    <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""}`}>
+    <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""} ${isShareOverview ? "share-overview-view" : ""}`}>
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">路</div>
@@ -2034,16 +2064,19 @@ export default function Home() {
             <span>全程总里程</span>
             <strong>{roadbookDistanceSummary.complete ? formatKilometers(roadbookDistanceSummary.distance) : readOnly ? "未完整记录" : amapLoaded ? "计算中…" : "待连接高德"}</strong>
           </div>
+          {readOnly && <button className={`share-overview-button ${isShareOverview ? "selected" : ""}`} type="button" onClick={() => setShareMapMode("overview")} aria-pressed={isShareOverview}>
+            <span className="share-overview-icon">⌁</span><span><strong>全程地图总览</strong><small>{days.length} 天 · 已记录 {mapRoutePaths.length} 段路线</small></span><span className="share-overview-arrow">{isShareOverview ? "已查看" : "查看 →"}</span>
+          </button>}
           <div className="day-list-header"><span>行程安排</span><span className="day-count">{days.length} DAYS</span></div>
           <div className="day-list">
             {days.map((day, index) => {
               const distanceSummary = dayDistanceById[day.id];
               const distanceLabel = distanceSummary?.complete ? formatKilometers(distanceSummary.distance) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待计算";
               return <div className="day-wrap" key={day.id}>
-                <button className={`day-card ${selectedDayId === day.id ? "selected" : ""}`} type="button" onClick={() => setSelectedDayId(day.id)}>
+                <button className={`day-card ${selectedDayId === day.id && !isShareOverview ? "selected" : ""}`} type="button" onClick={() => { setSelectedDayId(day.id); if (readOnly) setShareMapMode("day"); }}>
                   <span className="day-number">{String(index + 1).padStart(2, "0")}</span>
                   <span className="day-copy"><strong>{day.title}</strong><span className="day-meta-row"><small>{day.date} · {day.stops.length} 个地点</small><small className={`day-distance ${distanceSummary?.complete ? "ready" : ""}`}>{distanceLabel}</small></span></span>
-                  <span className="day-arrow">{selectedDayId === day.id ? "↗" : "→"}</span>
+                  <span className="day-arrow">{selectedDayId === day.id && !isShareOverview ? "↗" : "→"}</span>
                 </button>
                 {!readOnly && <><div className="day-hover-actions">
                   <button type="button" onClick={() => moveDay(day.id, -1)} aria-label="提前一天">↑</button>
@@ -2120,22 +2153,23 @@ export default function Home() {
         <div className={`split-divider ${isResizing ? "dragging" : ""}`} role="separator" aria-orientation="vertical" aria-label="调整编辑区和地图宽度" aria-valuemin={32} aria-valuemax={68} aria-valuenow={Math.round(editorWidth)} onPointerDown={startResize} onPointerMove={(event) => isResizing && updateEditorWidth(event.clientX)} onPointerUp={finishResize} onPointerCancel={finishResize}><span>⋮</span></div>
 
         <section className="map-panel">
-          <div className="map-topbar"><div><span className="map-label">LIVE MAP / AMAP</span><strong>{selectedDay.title}</strong></div>{!readOnly && <button className="map-control" type="button" onClick={() => setShowSettings(true)}>{settings.jsKey ? "已连接" : "连接高德"} <span>↗</span></button>}</div>
-          <div className={`map-wrap ${mapReady ? "has-amap" : ""}`}>
+          <div className="map-topbar"><div><span className="map-label">{isShareOverview ? "ROADBOOK OVERVIEW" : "LIVE MAP / AMAP"}</span><strong>{isShareOverview ? "全程路线总览" : selectedDay.title}</strong></div>{!readOnly && <button className="map-control" type="button" onClick={() => setShowSettings(true)}>{settings.jsKey ? "已连接" : "连接高德"} <span>↗</span></button>}</div>
+          <div className={`map-wrap ${mapReady ? "has-amap" : ""} ${isShareOverview ? "overview-map-wrap" : ""}`}>
             <div className="map-fallback" aria-label="路线示意图">
               <div className="map-grid" />
               <div className="map-river" />
               <div className="map-mountain mountain-one" /><div className="map-mountain mountain-two" />
-              {!sharedRoutePath.length && <div className="route-line" />}
-              {sharedRoutePath.length > 1 && <svg className="snapshot-route" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="分享前记录的路线"><polyline points={sharedMapProjection.line} /></svg>}
-              {mapStops.map((stop, index) => { const point = sharedRoutePath.length > 1 ? sharedMapProjection.markers[index] : { x: 18 + (index * 29), y: 66 - (index * 17) }; return <div key={stop.id} className="fallback-marker" style={{ left: `${point.x}%`, top: `${point.y}%` }}><span>{index + 1}</span><label>{stop.name}</label></div>; })}
+              {!mapRoutePaths.length && <div className="route-line" />}
+              {mapRoutePaths.length > 0 && <svg className="snapshot-route" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={isShareOverview ? "分享时记录的全程路线" : "分享前记录的路线"}>{sharedMapProjection.lines.map((line, index) => <polyline key={`${index}-${line.slice(0, 20)}`} points={line} className={isShareOverview ? "overview-route-segment" : undefined} />)}</svg>}
+              {mapMarkerStops.map((stop, index) => { const point = mapRoutePaths.length > 0 ? sharedMapProjection.markers[index] : { x: 18 + (index * 29), y: 66 - (index * 17) }; return <div key={`${stop.id}-${index}`} className={`fallback-marker ${isShareOverview ? "overview-marker" : ""}`} style={{ left: `${point.x}%`, top: `${point.y}%` }}><span>{stop.mapLabel ?? index + 1}</span><label>{stop.name}</label></div>; })}
               <div className="map-coordinates"><span>30°03′N</span><span>101°58′E</span></div>
               <div className="map-compass">N<br /><span>✦</span></div>
-              {!settings.jsKey && <div className="map-message"><span className="map-message-icon">⌖</span><strong>接入高德地图，查看真实路线</strong><p>当前分享页暂时无法加载高德地图底图。</p>{!readOnly && <button type="button" onClick={() => setShowSettings(true)}>去设置 Key <span>→</span></button>}</div>}
+              {isShareOverview && <div className="snapshot-map-badge">全程 {days.length} 天 · {mapRoutePaths.length} 段已记录路线</div>}
+              {!settings.jsKey && !readOnly && <div className="map-message"><span className="map-message-icon">⌖</span><strong>接入高德地图，查看真实路线</strong><p>当前分享页暂时无法加载高德地图底图。</p><button type="button" onClick={() => setShowSettings(true)}>去设置 Key <span>→</span></button></div>}
             </div>
             <div className="map-host" ref={mapContainer} />
           </div>
-          <div className="map-bottom"><div className="legend"><span><i className="legend-dot orange" />行程地点</span><span><i className="legend-dot green" />住宿</span></div><a href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">在高德中导航 ↗</a></div>
+          <div className="map-bottom"><div className="legend"><span><i className="legend-dot orange" />{isShareOverview ? "每日出发点" : "行程地点"}</span><span><i className="legend-dot green" />{isShareOverview ? "全程路线分段" : "住宿"}</span></div><a href={amapNavigationUrl(isShareOverview ? overviewStops : selectedDay.stops)} target="_blank" rel="noreferrer">{isShareOverview ? "在高德中查看起终点" : "在高德中导航"} ↗</a></div>
         </section>
       </div>
 
