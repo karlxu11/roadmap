@@ -1186,7 +1186,11 @@ export default function Home() {
   }, [amapLoaded, storageStatus, deferredMapMarkerDependencyKey]);
 
   useEffect(() => {
-    if (storageStatus === "loading" || !amapLoaded || !window.AMap || !mapRef.current) return;
+    // The map instance is created in the marker effect's animation frame. On a
+    // refreshed share page this effect can otherwise run first, return, and never
+    // draw the snapshot paths. Waiting for mapReady makes the first completed map
+    // initialization reliably trigger a route render.
+    if (storageStatus === "loading" || !amapLoaded || !mapReady || !window.AMap || !mapRef.current) return;
     const map = mapRef.current;
     const routeKey = routeCacheKey(selectedDay.stops);
     const combinedPath = selectedDay.stops.length >= 2
@@ -1218,7 +1222,7 @@ export default function Home() {
     });
     return () => window.cancelAnimationFrame(frame);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, isShareOverview, readOnly, deferredRoutePlanDependencyKey, deferredSelectedDayRouteDependencyKey, mapRoutePaths, selectedRouteCacheVersion, storageStatus]);
+  }, [amapLoaded, isShareOverview, mapReady, readOnly, deferredRoutePlanDependencyKey, deferredSelectedDayRouteDependencyKey, mapRoutePaths, selectedRouteCacheVersion, storageStatus]);
 
   useEffect(() => {
     if (readOnly || hasShareQuery() || storageStatus === "loading") {
