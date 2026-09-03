@@ -4,7 +4,7 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import Link from "next/link";
-import { initialDays as importedDays } from "./roadbook-data";
+import { initialDays as importedDays, tibetDays } from "./roadbook-data";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
 
 type StopKind = "出发" | "途经" | "住宿" | "景点";
@@ -105,6 +105,7 @@ declare global {
 }
 
 const initialDays: DayPlan[] = importedDays as unknown as DayPlan[];
+const importedTibetDays: DayPlan[] = tibetDays as unknown as DayPlan[];
 
 const ROADBOOK_LIBRARY_KEY = "roadbook-library-v1";
 const ROADBOOK_DRAFT_META_KEY = "roadbook-library-v1-draft";
@@ -421,6 +422,18 @@ function defaultRoadbook(): Roadbook {
   };
 }
 
+function tibetRoadbook(): Roadbook {
+  return {
+    id: "roadbook-amap-686f74ae52f2600e6d48cbdd",
+    title: "西藏",
+    description: "从深圳出发，沿318国道进藏，串联拉萨、山南、日喀则、林芝与昌都后返程",
+    region: "深圳 → 西藏 → 深圳",
+    updated: "已从高德路书导入",
+    startDate: "2025-09-20",
+    days: importedTibetDays,
+  };
+}
+
 function parseMonthDay(value: string) {
   const match = value.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
   return match ? { month: Number(match[1]), day: Number(match[2]) } : null;
@@ -503,8 +516,10 @@ function normalizeRoadbookDates(roadbooks: Roadbook[]) {
 
 function ensureImportedRoadbook(roadbooks: Roadbook[]) {
   const imported = defaultRoadbook();
-  if (roadbooks.some((roadbook) => roadbook.id === imported.id)) return { roadbooks, added: false };
-  return { roadbooks: [imported, ...roadbooks], added: true };
+  const tibet = tibetRoadbook();
+  const existingIds = new Set(roadbooks.map((roadbook) => roadbook.id));
+  const additions = [tibet, imported].filter((roadbook) => !existingIds.has(roadbook.id));
+  return { roadbooks: [...additions, ...roadbooks], added: additions.length > 0 };
 }
 
 function loadRoadbooks(): Roadbook[] {
@@ -528,7 +543,7 @@ function loadRoadbooks(): Roadbook[] {
       window.localStorage.removeItem(LEGACY_ROADBOOK_KEY);
     }
   }
-  return normalizeRoadbookDates([defaultRoadbook()]);
+  return normalizeRoadbookDates(ensureImportedRoadbook([defaultRoadbook()]).roadbooks);
 }
 
 function loadRoadbookDraftMeta(): RoadbookDraftMeta {
