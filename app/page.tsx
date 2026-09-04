@@ -4,7 +4,7 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import Link from "next/link";
-import { initialDays as importedDays, tibetDays } from "./roadbook-data";
+import { daxinganlingDays, initialDays as importedDays, tibetDays } from "./roadbook-data";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
 
 type StopKind = "出发" | "途经" | "住宿" | "景点";
@@ -434,6 +434,18 @@ function tibetRoadbook(): Roadbook {
   };
 }
 
+function daxinganlingRoadbook(): Roadbook {
+  return {
+    id: "roadbook-amap-6a6ac8888244b107b7cfb234",
+    title: "2026中秋国庆大兴安岭",
+    description: "从深圳出发，经洛阳、乌兰察布、锡林郭勒、赤峰、阿尔山与呼伦贝尔后返程",
+    region: "深圳 → 大兴安岭 → 深圳",
+    updated: "已从高德路书导入",
+    startDate: "2026-09-19",
+    days: daxinganlingDays as unknown as DayPlan[],
+  };
+}
+
 function parseMonthDay(value: string) {
   const match = value.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
   return match ? { month: Number(match[1]), day: Number(match[2]) } : null;
@@ -517,8 +529,9 @@ function normalizeRoadbookDates(roadbooks: Roadbook[]) {
 function ensureImportedRoadbook(roadbooks: Roadbook[]) {
   const imported = defaultRoadbook();
   const tibet = tibetRoadbook();
+  const daxinganling = daxinganlingRoadbook();
   const existingIds = new Set(roadbooks.map((roadbook) => roadbook.id));
-  const additions = [tibet, imported].filter((roadbook) => !existingIds.has(roadbook.id));
+  const additions = [daxinganling, tibet, imported].filter((roadbook) => !existingIds.has(roadbook.id));
   return { roadbooks: [...additions, ...roadbooks], added: additions.length > 0 };
 }
 
