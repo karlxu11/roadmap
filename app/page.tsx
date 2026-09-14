@@ -502,12 +502,8 @@ function isRoutePlaceholder(stop: Stop) {
   return stop.area === "点击右侧搜索添加" || stop.name.startsWith("添加一个");
 }
 
-function fallbackStop(): Stop {
-  return { id: uid("stop"), name: "添加出发点", area: "点击“添加地点”搜索", kind: "出发", lat: 30.657, lng: 104.066, duration: "待安排" };
-}
-
 function fallbackDay(): DayPlan {
-  return { id: uid("day"), date: "待安排", title: "第一天", subtitle: "先把想去的地方放进来", stops: [fallbackStop()] };
+  return { id: uid("day"), date: "待安排", title: "第一天", subtitle: "先把想去的地方放进来", stops: [] };
 }
 
 function normalizeStoredStop(value: unknown): Stop | null {
@@ -533,12 +529,13 @@ function normalizeStoredDay(value: unknown, index: number): DayPlan | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<DayPlan>;
   const stops = Array.isArray(raw.stops) ? raw.stops.map(normalizeStoredStop).filter((stop): stop is Stop => Boolean(stop)) : [];
+  const migratedStops = stops.length === 1 && stops[0].name === "添加出发点" && stops[0].area === "点击“添加地点”搜索" ? [] : stops;
   return {
     id: typeof raw.id === "string" && raw.id.trim() ? raw.id : uid("day"),
     date: typeof raw.date === "string" && raw.date.trim() ? raw.date : "待安排",
     title: typeof raw.title === "string" && raw.title.trim() ? raw.title : `第 ${index + 1} 天`,
     subtitle: typeof raw.subtitle === "string" ? raw.subtitle : "先把想去的地方放进来",
-    stops: stops.length ? stops : [fallbackStop()],
+    stops: migratedStops,
   };
 }
 
@@ -732,7 +729,7 @@ function makeNewRoadbook(title: string, description: string): Roadbook {
     date: formatMonthDay(startDate),
     title: "新的第一天",
     subtitle: "先把想去的地方放进来",
-    stops: [{ id: uid("stop"), name: "添加出发点", area: "点击“添加地点”搜索", kind: "出发", lat: 30.657, lng: 104.066, duration: "待安排" }],
+    stops: [],
   };
   return {
     id: uid("roadbook"),
@@ -788,17 +785,13 @@ function uid(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function makeInsertedDay(afterDay?: DayPlan): DayPlan {
-  const previousStop = afterDay?.stops.at(-1) ?? fallbackStop();
+function makeInsertedDay(): DayPlan {
   return {
     id: uid("day"),
     date: "待安排",
     title: "留白的一天",
     subtitle: "放慢脚步，给旅程留一点弹性",
-    stops: [
-      { ...previousStop, id: uid("stop"), kind: "出发", duration: "09:30 出发", note: "从上一天的终点开始。" },
-      { id: uid("stop"), name: "添加一个想去的地方", area: "点击右侧搜索添加", kind: "景点", lat: previousStop.lat, lng: previousStop.lng, duration: "待安排" },
-    ],
+    stops: [],
   };
 }
 
@@ -878,6 +871,7 @@ export default function Home() {
   const [adminUsersError, setAdminUsersError] = useState("");
   const [deletingAdminUserId, setDeletingAdminUserId] = useState<string | null>(null);
   const [showAddPlace, setShowAddPlace] = useState(false);
+  const [editingStopId, setEditingStopId] = useState<string | null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
   const [showCopyRoadbook, setShowCopyRoadbook] = useState(false);
   const [showShareManager, setShowShareManager] = useState(false);
@@ -974,7 +968,7 @@ export default function Home() {
         if (sharedSnapshot) return undefined;
         return routeCacheLegs[legCacheKey(stop, day.stops[index + 1])];
       });
-      const complete = metrics.every((metric) => metric && typeof metric.distance === "number");
+      const complete = metrics.length > 0 && metrics.every((metric) => metric && typeof metric.distance === "number");
       return {
         dayId: day.id,
         complete,
@@ -1000,6 +994,7 @@ export default function Home() {
     };
   }, [dayDistanceSummaries, selectedDayIndex]);
   const routeSummary = useMemo(() => {
+    if (selectedDay.stops.length < 2) return null;
     const legs = selectedDay.stops.slice(0, -1).map((stop) => displayLegMetrics[stop.id]).filter((metric) => metric?.status === "ready");
     const expectedLegs = Math.max(selectedDay.stops.length - 1, 0);
     if (legs.length !== expectedLegs) return null;
@@ -1014,9 +1009,7 @@ export default function Home() {
     const cachedLegs = days.flatMap((day) => day.stops.slice(0, -1).map((stop, index) => sharedSnapshot
       ? sharedSnapshot.legs[stop.id]
       : routeCacheLegs[legCacheKey(stop, day.stops[index + 1])]));
-    const complete = sharedSnapshot
-      ? cachedLegs.every((leg) => leg && typeof leg.tolls === "number")
-      : cachedLegs.every((leg) => leg && typeof leg.tolls === "number");
+    const complete = cachedLegs.length > 0 && cachedLegs.every((leg) => leg && typeof leg.tolls === "number");
     return {
       complete,
       amount: complete ? cachedLegs.reduce((sum, leg) => sum + (leg?.tolls ?? 0), 0) : undefined,
@@ -1032,7 +1025,7 @@ export default function Home() {
         if (current?.status === "ready") return current;
         return routeCacheLegs[legCacheKey(stop, day.stops[index + 1])];
       });
-      const complete = metrics.every((metric) => metric && typeof metric.tolls === "number");
+      const complete = metrics.length > 0 && metrics.every((metric) => metric && typeof metric.tolls === "number");
       return {
         day,
         complete,
@@ -1043,8 +1036,8 @@ export default function Home() {
   }, [days, displayLegMetrics, routeCacheLegs, routeCacheVersion, selectedDay, selectedDayIndex, sharedSnapshot]);
   const cumulativeTollsComplete = cumulativeTollDays.every(({ complete }) => complete);
   const cumulativeTollsAmount = cumulativeTollsComplete ? cumulativeTollDays.reduce((sum, item) => sum + (item.amount ?? 0), 0) : undefined;
-  const routeDistance = routeSummary ? formatDistance(routeSummary.distance) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
-  const routeDuration = routeSummary ? formatDuration(routeSummary.duration) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
+  const routeDistance = routeSummary ? formatDistance(routeSummary.distance) : selectedDay.stops.length < 2 ? "待规划" : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
+  const routeDuration = routeSummary ? formatDuration(routeSummary.duration) : selectedDay.stops.length < 2 ? "待规划" : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
   const departureStop = selectedDay.stops.find((stop) => stop.kind === "出发");
   const departureTime = departureStop ? extractClock(departureStop.duration) : "09:00";
   const stopArrivalTimes = useMemo(() => {
@@ -1713,8 +1706,7 @@ export default function Home() {
 
   function insertDay(afterId = selectedDayId) {
     const index = days.findIndex((day) => day.id === afterId);
-    const source = days[index] ?? days.at(-1);
-    const inserted = makeInsertedDay(source);
+    const inserted = makeInsertedDay();
     const insertAt = index >= 0 ? index + 1 : days.length;
     startTransition(() => {
       updateActiveDays((current) => normalizeDayDates([...current.slice(0, insertAt), inserted, ...current.slice(insertAt)]));
@@ -1821,12 +1813,31 @@ export default function Home() {
   }
 
   function removeStop(stopId: string) {
-    if (selectedDay.stops.length <= 1) {
-      flash("至少保留一个地点，不能删除最后一个地点");
-      return;
-    }
-    updateSelectedDay((day) => ({ ...day, stops: day.stops.filter((stop) => stop.id !== stopId) }));
+    updateSelectedDay((day) => {
+      const stops = day.stops.filter((stop) => stop.id !== stopId);
+      if (stops.length > 0 && !stops.some((stop) => stop.kind === "出发")) {
+        return { ...day, stops: [{ ...stops[0], kind: "出发", duration: "09:00 出发" }, ...stops.slice(1)] };
+      }
+      return { ...day, stops };
+    });
     flash("已移除地点");
+  }
+
+  function openPlaceSearch(stopId?: string) {
+    if (readOnly) return;
+    const target = stopId ? selectedDay.stops.find((stop) => stop.id === stopId) : undefined;
+    setEditingStopId(target?.id ?? null);
+    setQuery(target?.name ?? "");
+    setSearchResults([]);
+    setShowAddPlace(true);
+    if (target) void searchPlaces(target.name);
+  }
+
+  function closePlaceSearch() {
+    setShowAddPlace(false);
+    setEditingStopId(null);
+    setQuery("");
+    setSearchResults([]);
   }
 
   async function searchPlaces(rawKeyword = query) {
@@ -1927,23 +1938,27 @@ export default function Home() {
 
   function addSearchResult(result: SearchResult) {
     if (readOnly) return;
-    const fallback = selectedDay.stops.at(-1)!;
+    const editingStop = editingStopId ? selectedDay.stops.find((stop) => stop.id === editingStopId) : undefined;
+    const fallback = editingStop ?? selectedDay.stops.at(-1);
+    const isFirstStop = !editingStop && selectedDay.stops.length === 0;
     const stop: Stop = {
-      id: uid("stop"),
+      id: editingStop?.id ?? uid("stop"),
       name: result.name,
       area: result.address || "已添加地点",
-      kind: "景点",
-      lat: result.location?.lat ?? fallback.lat,
-      lng: result.location?.lng ?? fallback.lng,
-      duration: "待安排",
+      kind: editingStop?.kind ?? (isFirstStop ? "出发" : "景点"),
+      lat: result.location?.lat ?? fallback?.lat ?? 30.657,
+      lng: result.location?.lng ?? fallback?.lng ?? 104.066,
+      duration: editingStop?.duration ?? (isFirstStop ? "09:00 出发" : "待安排"),
+      ...(editingStop?.note ? { note: editingStop.note } : {}),
     };
-    setQuery("");
-    setSearchResults([]);
-    setShowAddPlace(false);
+    const replacingId = editingStop?.id;
+    closePlaceSearch();
     startTransition(() => {
-      updateSelectedDay((day) => ({ ...day, stops: [...day.stops, stop] }));
+      updateSelectedDay((day) => replacingId
+        ? { ...day, stops: day.stops.map((item) => item.id === replacingId ? stop : item) }
+        : { ...day, stops: [...day.stops, stop] });
     });
-    flash(`已把「${result.name}」加入第 ${days.findIndex((day) => day.id === selectedDayId) + 1} 天`);
+    flash(replacingId ? `已把地点修改为「${result.name}」` : `已把「${result.name}」加入第 ${days.findIndex((day) => day.id === selectedDayId) + 1} 天`);
   }
 
   async function commitRoadbooks(next: Roadbook[], successMessage: string, afterRemoteSave?: () => Promise<string | null>) {
@@ -2358,7 +2373,7 @@ export default function Home() {
               <div className="title-row"><input readOnly={readOnly} aria-label="编辑当天标题" value={selectedDay.title} onChange={(event) => updateSelectedDay((day) => ({ ...day, title: event.target.value }))} />{!readOnly && <span className="edit-hint">↗</span>}</div>
               <input className="subtitle-input" readOnly={readOnly} aria-label="编辑当天副标题" value={selectedDay.subtitle} onChange={(event) => updateSelectedDay((day) => ({ ...day, subtitle: event.target.value }))} />
             </div>
-            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowAddPlace(true)}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "正在补齐全程路线…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
+            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => openPlaceSearch()}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "正在补齐全程路线…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
           <div className="stats-strip"><div className="date-stat"><span className="stat-label">当日日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当日日期" onInput={(event) => updateSelectedDayDate(event.currentTarget.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中…" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
@@ -2366,6 +2381,7 @@ export default function Home() {
           <div className="stops-section">
             <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "路径、费用和时间以分享时记录为准" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
             <div className="timeline">
+              {selectedDay.stops.length === 0 && <div className="empty-day-state"><span>⌖</span><strong>这一天还没有地点</strong><p>先添加一个出发点，再继续安排当天行程。</p>{!readOnly && <button className="primary-button" type="button" onClick={() => openPlaceSearch()}>＋ 添加第一个地点</button>}</div>}
               {selectedDay.stops.map((stop, index) => {
                 const destination = selectedDay.stops[index + 1];
                 const serviceAreaKey = destination ? legCacheKey(stop, destination) : "";
@@ -2389,9 +2405,9 @@ export default function Home() {
                         </div>}
                         <a className="stop-navigation-button" href={amapStopNavigationUrl(stop)} target="_blank" rel="noreferrer">导航到这里 ↗</a>
                       </div>
-                      {!readOnly && <div className="stop-tools">{stop.kind !== "出发" && <button className="set-departure-button" type="button" onClick={() => setStopAsDeparture(stop.id)} aria-label={`将${stop.name}设为出发点`}>设为出发</button>}<button type="button" onClick={() => moveStop(stop.id, -1)} aria-label="上移地点">↑</button><button type="button" onClick={() => moveStop(stop.id, 1)} aria-label="下移地点">↓</button><button type="button" onClick={() => removeStop(stop.id)} aria-label="删除地点">×</button></div>}
+                      {!readOnly && <div className="stop-tools">{stop.kind !== "出发" && <button className="set-departure-button" type="button" onClick={() => setStopAsDeparture(stop.id)} aria-label={`将${stop.name}设为出发点`}>设为出发</button>}<button type="button" onClick={() => openPlaceSearch(stop.id)} aria-label={`修改${stop.name}`}>✎</button><button type="button" onClick={() => moveStop(stop.id, -1)} aria-label="上移地点">↑</button><button type="button" onClick={() => moveStop(stop.id, 1)} aria-label="下移地点">↓</button><button type="button" onClick={() => removeStop(stop.id)} aria-label="删除地点">×</button></div>}
                     </div>
-                    {index === selectedDay.stops.length - 1 && <div className="trip-total-summary"><span>总时长</span><strong>{routeSummary ? formatDuration(routeSummary.duration) : readOnly ? "未记录" : mapReady ? "正在计算…" : "待连接高德"}</strong>{routeSummary && <span className="toll-summary">高速费 {formatTolls(routeSummary.tolls)}</span>}{days.at(-1)?.id === selectedDay.id && <span className="toll-summary total-toll-summary">全程高速费 {allRoadbookTolls.complete ? formatTolls(allRoadbookTolls.amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span>}</div>}
+                    {index === selectedDay.stops.length - 1 && <div className="trip-total-summary"><span>总时长</span><strong>{routeSummary ? formatDuration(routeSummary.duration) : selectedDay.stops.length < 2 ? "待规划" : readOnly ? "未记录" : mapReady ? "正在计算…" : "待连接高德"}</strong>{routeSummary && <span className="toll-summary">高速费 {formatTolls(routeSummary.tolls)}</span>}{days.at(-1)?.id === selectedDay.id && <span className="toll-summary total-toll-summary">全程高速费 {allRoadbookTolls.complete ? formatTolls(allRoadbookTolls.amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span>}</div>}
                     {!readOnly && editingNoteStopId === stop.id && <div className="stop-note-editor"><textarea value={noteDraft} maxLength={200} autoFocus aria-label={`编辑${stop.name}备注`} placeholder="写下这个途经点的提醒，例如：补能、吃饭或拍照" onChange={(event) => setNoteDraft(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveStopNote(stop.id); if (event.key === "Escape") cancelNoteEdit(); }} /><div className="stop-note-actions"><small>{noteDraft.length}/200 · ⌘↵ 保存</small><div><button type="button" onClick={cancelNoteEdit}>取消</button><button className="save-note-button" type="button" onClick={() => saveStopNote(stop.id)}>保存备注</button></div></div></div>}
                     {!readOnly && editingNoteStopId !== stop.id && <div className={`stop-note ${stop.note ? "has-note" : "empty-note"}`}><span>✦</span>{stop.note ? <><span className="note-text">{stop.note}</span><button type="button" onClick={() => startNoteEdit(stop)}>编辑</button></> : <button type="button" onClick={() => startNoteEdit(stop)}>添加备注</button>}</div>}
                     {readOnly && stop.note && <div className="stop-note has-note"><span>✦</span><span className="note-text">{stop.note}</span></div>}
@@ -2406,7 +2422,7 @@ export default function Home() {
                 </div>;
               })}
             </div>
-            {!readOnly && <button className="inline-add" type="button" onClick={() => setShowAddPlace(true)}>＋ 在这一天添加一个地点</button>}
+            {!readOnly && selectedDay.stops.length > 0 && <button className="inline-add" type="button" onClick={() => openPlaceSearch()}>＋ 在这一天添加一个地点</button>}
           </div>
         </section>
 
@@ -2440,7 +2456,7 @@ export default function Home() {
       {showCopyRoadbook && <CopyRoadbookModal sourceTitle={activeRoadbook.title} onClose={() => setShowCopyRoadbook(false)} onSave={copyRoadbook} />}
       {showShareManager && <ShareManagerModal links={shareLinks} isLoading={isLoadingShareLinks} onClose={() => setShowShareManager(false)} onRefresh={() => void refreshShareLinks()} onCopy={(link) => void copyShareLink(link)} onRevoke={(link) => void revokeShareLink(link)} />}
       {showAdminUsers && <AdminUsersModal users={adminUsers} isLoading={isLoadingAdminUsers} error={adminUsersError} deletingUserId={deletingAdminUserId} onClose={() => setShowAdminUsers(false)} onRefresh={() => void loadAdminUsers()} onDelete={(user) => void deleteAdminUser(user)} />}
-      {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{formatSearchResultMeta(result)}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在结合当前行程位置搜索，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">搜索会结合当天行程位置、城市和全国结果，并优先显示名称最匹配的地点。</div></div></div>}
+      {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closePlaceSearch()}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">{editingStopId ? "EDIT A PLACE" : "ADD A PLACE"}</span><h2>{editingStopId ? "修改这个地点" : "把想去的地方放进来"}</h2></div><button type="button" className="modal-close" onClick={closePlaceSearch}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{formatSearchResultMeta(result)}</small></span><span className="result-add">{editingStopId ? "修改" : "＋"}</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在结合当前行程位置搜索，或按回车立即搜索" : editingStopId ? "搜索并选择新的地点" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">{editingStopId ? "选择搜索结果后会替换原地点，行程类型、出发时间和备注会保留。" : "搜索会结合当天行程位置、城市和全国结果，并优先显示名称最匹配的地点。"}</div></div></div>}
 
       {showCumulativeTolls && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowCumulativeTolls(false)}><div className="modal-card cumulative-tolls-modal" role="dialog" aria-modal="true" aria-labelledby="cumulative-tolls-title"><div className="modal-head"><div><span className="eyebrow">TOLL CALCULATOR</span><h2 id="cumulative-tolls-title">截至第 {selectedDayIndex + 1} 天</h2></div><button type="button" className="modal-close" onClick={() => setShowCumulativeTolls(false)} aria-label="关闭累计高速费">×</button></div><p className="cumulative-tolls-lead">从 {days[0]?.date ?? "出发日"} 出发，累计计算到 {selectedDay.date} 的所有行程高速费。</p><div className="cumulative-tolls-total"><span>累计高速费</span><strong>{cumulativeTollsComplete ? formatTolls(cumulativeTollsAmount) : readOnly ? "未记录" : amapLoaded ? "正在计算…" : "待获取"}</strong></div><div className="cumulative-tolls-list">{cumulativeTollDays.map(({ day, complete, amount }, index) => <div className="cumulative-toll-row" key={day.id}><div><strong>第 {index + 1} 天 · {day.date}</strong><small>{day.title}</small></div><span>{complete ? formatTolls(amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span></div>)}</div>{!cumulativeTollsComplete && !readOnly && !amapLoaded && <div className="modal-foot">请先连接高德地图，路线规划完成后再次打开这里即可看到累计高速费。</div>}<div className="modal-actions"><button className="primary-button" type="button" onClick={() => setShowCumulativeTolls(false)}>知道了 <span>→</span></button></div></div></div>}
 
