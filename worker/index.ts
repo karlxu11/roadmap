@@ -1,6 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { daxinganlingDays, initialDays as importedInitialDays, tibetDays } from "../app/roadbook-data";
 import { inputTipsToPois, rankAmapPois } from "./amap-search";
 import { extractHighwayPath, rankRouteServiceAreas, sampleRouteSearchPoints } from "./service-areas";
 
@@ -34,6 +35,7 @@ const SESSION_COOKIE = "roadbook_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 const ROADBOOK_STORAGE_KEY = "roadbooks:default";
 const ROADBOOK_USER_STORAGE_PREFIX = "roadbooks:user:";
+const ADMIN_STARTER_BINDING_KEY = "roadbooks:admin-starters-v1";
 const STARTER_ROADBOOK_IDS = new Set([
   "roadbook-69defbdbf04061086bd0cf71",
   "roadbook-amap-686f74ae52f2600e6d48cbdd",
@@ -85,6 +87,15 @@ type UserRecord = {
   createdAt: string;
 };
 type SessionRecord = { userId: string; createdAt: string };
+type RoadbookRecord = {
+  id: string;
+  title: string;
+  description: string;
+  region: string;
+  updated: string;
+  startDate?: string;
+  days: unknown[];
+};
 function normalizeCoordinate(value: string | null) {
   if (!value) return null;
   const [lng, lat] = value.split(",").map(Number);
@@ -397,6 +408,7 @@ async function ensureAdmin(env: Env) {
       createdAt: new Date().toISOString(),
     };
     await putUser(env, user);
+    await bindAdminStarterRoadbooks(env, user.id);
     await claimLegacyShareLinks(env, user.id);
     return user;
   }
@@ -413,8 +425,55 @@ async function ensureAdmin(env: Env) {
     },
   };
   if (JSON.stringify(next) !== JSON.stringify(existing)) await putUser(env, next);
+  await bindAdminStarterRoadbooks(env, next.id);
   await claimLegacyShareLinks(env, next.id);
   return next;
+}
+
+function adminStarterRoadbooks(): RoadbookRecord[] {
+  return [
+    {
+      id: "roadbook-69defbdbf04061086bd0cf71",
+      title: "五一伊犁",
+      description: "从深圳出发，穿越河西走廊，游览赛里木湖、库尔德宁与那拉提草原后返程",
+      region: "深圳 → 伊犁 → 深圳",
+      updated: "已从高德路书导入",
+      startDate: "2026-04-29",
+      days: importedInitialDays,
+    },
+    {
+      id: "roadbook-amap-686f74ae52f2600e6d48cbdd",
+      title: "西藏",
+      description: "从深圳出发，沿318国道进藏，串联拉萨、山南、日喀则、林芝与昌都后返程",
+      region: "深圳 → 西藏 → 深圳",
+      updated: "已从高德路书导入",
+      startDate: "2025-09-20",
+      days: tibetDays,
+    },
+    {
+      id: "roadbook-amap-6a6ac8888244b107b7cfb234",
+      title: "2026中秋国庆大兴安岭",
+      description: "从深圳出发，经洛阳、乌兰察布、锡林郭勒、赤峰、阿尔山与呼伦贝尔后返程",
+      region: "深圳 → 大兴安岭 → 深圳",
+      updated: "已从高德路书导入",
+      startDate: "2026-09-19",
+      days: daxinganlingDays,
+    },
+  ];
+}
+
+async function bindAdminStarterRoadbooks(env: Env, adminId: string) {
+  if (!env.ROADBOOK_KV || await env.ROADBOOK_KV.get(ADMIN_STARTER_BINDING_KEY)) return;
+  const adminKey = userRoadbookStorageKey(adminId);
+  const [existing, legacy] = await Promise.all([
+    env.ROADBOOK_KV.get(adminKey, "json"),
+    env.ROADBOOK_KV.get(ROADBOOK_STORAGE_KEY, "json"),
+  ]);
+  const base = Array.isArray(existing) && existing.length ? existing : Array.isArray(legacy) ? legacy : [];
+  const existingIds = new Set(base.map((item) => item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string" ? (item as { id: string }).id : ""));
+  const additions = adminStarterRoadbooks().filter((roadbook) => !existingIds.has(roadbook.id));
+  await env.ROADBOOK_KV.put(adminKey, JSON.stringify([...additions, ...base]));
+  await env.ROADBOOK_KV.put(ADMIN_STARTER_BINDING_KEY, "1");
 }
 
 async function claimLegacyShareLinks(env: Env, ownerId: string) {

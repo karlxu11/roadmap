@@ -83,6 +83,13 @@ test("registered users receive isolated roadbooks and AMap settings", async () =
     body: JSON.stringify({ username: "admin", password: "nsnkarlxu" }),
   });
   assert.equal(adminLogin.status, 200);
+  const adminBooks = await request("/api/roadbooks", { headers: { cookie: cookieFrom(adminLogin) } });
+  const adminRoadbooks = (await adminBooks.json()).roadbooks;
+  assert.deepEqual(adminRoadbooks.map(({ id }) => id).sort(), [
+    "roadbook-69defbdbf04061086bd0cf71",
+    "roadbook-amap-686f74ae52f2600e6d48cbdd",
+    "roadbook-amap-6a6ac8888244b107b7cfb234",
+  ].sort());
   const adminConfig = await request("/api/amap-config", { headers: { cookie: cookieFrom(adminLogin) } });
   assert.deepEqual(await adminConfig.json(), { jsKey: "admin-js", securityCode: "admin-security", webKey: "admin-web" });
 
