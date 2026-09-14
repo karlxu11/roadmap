@@ -402,6 +402,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .roadbook-distance-summary strong { color: var(--green); font-size: 14px; white-space: nowrap; }
 .roadbook-distance-summary.pending { border-color: #e2e7ed; background: #f8fafc; }
 .roadbook-distance-summary.pending strong { color: #929cab; font-size: 11px; }
+.roadbook-distance-summary { align-items: center; cursor: pointer; text-align: left; transition: border-color .18s ease, background .18s ease, box-shadow .18s ease, transform .18s ease; }
+.roadbook-distance-summary:hover, .roadbook-distance-summary.selected { border-color: #bfcaf6; background: #edf1ff; box-shadow: 0 8px 20px rgba(53, 89, 217, .1); transform: translateY(-1px); }
+.roadbook-overview-icon { width: 25px; height: 25px; display: grid; place-items: center; flex-shrink: 0; border-radius: 7px; background: var(--blue); color: #fff; font-size: 16px; }
+.roadbook-distance-summary-label { flex: 1; }
+.roadbook-distance-summary-arrow { flex-shrink: 0; color: #5b6fc2; font-size: 10px; font-weight: 700; }
 .day-list-header { padding: 0 10px 10px; color: #3f4a5d; font-size: 12px; }
 .day-count { color: #9aa4b3; font-size: 10px; }
 .day-list { padding: 2px; }
