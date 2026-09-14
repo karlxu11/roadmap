@@ -502,6 +502,66 @@ function isRoutePlaceholder(stop: Stop) {
   return stop.area === "点击右侧搜索添加" || stop.name.startsWith("添加一个");
 }
 
+function fallbackStop(): Stop {
+  return { id: uid("stop"), name: "添加出发点", area: "点击“添加地点”搜索", kind: "出发", lat: 30.657, lng: 104.066, duration: "待安排" };
+}
+
+function fallbackDay(): DayPlan {
+  return { id: uid("day"), date: "待安排", title: "第一天", subtitle: "先把想去的地方放进来", stops: [fallbackStop()] };
+}
+
+function normalizeStoredStop(value: unknown): Stop | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<Stop>;
+  const lat = typeof raw.lat === "number" ? raw.lat : Number(raw.lat);
+  const lng = typeof raw.lng === "number" ? raw.lng : Number(raw.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  const kind: StopKind = raw.kind === "出发" || raw.kind === "途经" || raw.kind === "住宿" || raw.kind === "景点" ? raw.kind : "景点";
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : uid("stop"),
+    name: typeof raw.name === "string" && raw.name.trim() ? raw.name : "未命名地点",
+    area: typeof raw.area === "string" ? raw.area : "已添加地点",
+    kind,
+    lat,
+    lng,
+    duration: typeof raw.duration === "string" && raw.duration.trim() ? raw.duration : "待安排",
+    ...(typeof raw.note === "string" && raw.note.trim() ? { note: raw.note } : {}),
+  };
+}
+
+function normalizeStoredDay(value: unknown, index: number): DayPlan | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<DayPlan>;
+  const stops = Array.isArray(raw.stops) ? raw.stops.map(normalizeStoredStop).filter((stop): stop is Stop => Boolean(stop)) : [];
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : uid("day"),
+    date: typeof raw.date === "string" && raw.date.trim() ? raw.date : "待安排",
+    title: typeof raw.title === "string" && raw.title.trim() ? raw.title : `第 ${index + 1} 天`,
+    subtitle: typeof raw.subtitle === "string" ? raw.subtitle : "先把想去的地方放进来",
+    stops: stops.length ? stops : [fallbackStop()],
+  };
+}
+
+function normalizeStoredRoadbook(value: unknown): Roadbook | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<Roadbook>;
+  const days = Array.isArray(raw.days) ? raw.days.map(normalizeStoredDay).filter((day): day is DayPlan => Boolean(day)) : [];
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : uid("roadbook"),
+    title: typeof raw.title === "string" && raw.title.trim() ? raw.title : "未命名路书",
+    description: typeof raw.description === "string" ? raw.description : "一段新的旅程",
+    region: typeof raw.region === "string" ? raw.region : "自定义行程",
+    updated: typeof raw.updated === "string" ? raw.updated : "刚刚更新",
+    ...(typeof raw.startDate === "string" ? { startDate: raw.startDate } : {}),
+    days: days.length ? days : [fallbackDay()],
+  };
+}
+
+function normalizeStoredRoadbooks(value: unknown): Roadbook[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeStoredRoadbook).filter((roadbook): roadbook is Roadbook => Boolean(roadbook));
+}
+
 function searchCityHint(stop?: Stop) {
   if (!stop) return "";
   return stop.area.split("·")[0]?.trim() ?? "";
@@ -524,7 +584,7 @@ function normalizeDayDates(days: DayPlan[]) {
 }
 
 function normalizeRoadbookDates(roadbooks: Roadbook[]) {
-  return roadbooks.map((roadbook) => {
+  return normalizeStoredRoadbooks(roadbooks).map((roadbook) => {
     const startDate = getRoadbookStartDate(roadbook);
     return {
       ...roadbook,
@@ -561,8 +621,8 @@ function loadRoadbooks(storageScope = "legacy"): Roadbook[] {
   const savedLibrary = window.localStorage.getItem(libraryKey);
   if (savedLibrary) {
     try {
-      const parsed = JSON.parse(savedLibrary) as Roadbook[];
-      if (Array.isArray(parsed) && parsed.length) {
+      const parsed = normalizeStoredRoadbooks(JSON.parse(savedLibrary));
+      if (parsed.length) {
         if (storageScope !== "legacy" && isUnmodifiedStarterCollection(parsed)) return [makeFirstRoadbook()];
         return normalizeRoadbookDates(storageScope === "legacy" ? ensureImportedRoadbook(parsed).roadbooks : parsed);
       }
@@ -574,8 +634,9 @@ function loadRoadbooks(storageScope = "legacy"): Roadbook[] {
   const legacy = storageScope === "legacy" ? window.localStorage.getItem(legacyKey) : null;
   if (legacy) {
     try {
-      const parsed = JSON.parse(legacy) as DayPlan[];
-      if (Array.isArray(parsed) && parsed.length) return [{ ...defaultRoadbook(), days: normalizeDayDates(parsed) }];
+      const parsed = JSON.parse(legacy);
+      const days = Array.isArray(parsed) ? parsed.map(normalizeStoredDay).filter((day): day is DayPlan => Boolean(day)) : [];
+      if (days.length) return [{ ...defaultRoadbook(), days: normalizeDayDates(days) }];
     } catch {
       window.localStorage.removeItem(LEGACY_ROADBOOK_KEY);
     }
@@ -648,8 +709,8 @@ async function fetchRemoteRoadbooks(storageScope = "legacy") {
   if (!response.ok) throw new Error(`roadbook-storage-${response.status}`);
   const payload = await response.json() as { roadbooks?: unknown };
   if (!Array.isArray(payload.roadbooks)) return null;
-  if (!payload.roadbooks.length) return { roadbooks: [makeFirstRoadbook()], added: true };
   const normalized = normalizeRoadbookDates(payload.roadbooks as Roadbook[]);
+  if (!normalized.length) return { roadbooks: [makeFirstRoadbook()], added: true };
   if (storageScope !== "legacy") return { roadbooks: normalized, added: false };
   const seeded = ensureImportedRoadbook(normalized);
   return { roadbooks: seeded.roadbooks, added: seeded.added };
@@ -727,15 +788,16 @@ function uid(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function makeInsertedDay(afterDay: DayPlan): DayPlan {
+function makeInsertedDay(afterDay?: DayPlan): DayPlan {
+  const previousStop = afterDay?.stops.at(-1) ?? fallbackStop();
   return {
     id: uid("day"),
     date: "待安排",
     title: "留白的一天",
     subtitle: "放慢脚步，给旅程留一点弹性",
     stops: [
-      { ...afterDay.stops.at(-1)!, id: uid("stop"), kind: "出发", duration: "09:30 出发", note: "从上一天的终点开始。" },
-      { id: uid("stop"), name: "添加一个想去的地方", area: "点击右侧搜索添加", kind: "景点", lat: afterDay.stops.at(-1)?.lat ?? 30.05, lng: afterDay.stops.at(-1)?.lng ?? 101.96, duration: "待安排" },
+      { ...previousStop, id: uid("stop"), kind: "出发", duration: "09:30 出发", note: "从上一天的终点开始。" },
+      { id: uid("stop"), name: "添加一个想去的地方", area: "点击右侧搜索添加", kind: "景点", lat: previousStop.lat, lng: previousStop.lng, duration: "待安排" },
     ],
   };
 }
@@ -1651,10 +1713,11 @@ export default function Home() {
 
   function insertDay(afterId = selectedDayId) {
     const index = days.findIndex((day) => day.id === afterId);
-    const source = days[index] ?? days[0];
+    const source = days[index] ?? days.at(-1);
     const inserted = makeInsertedDay(source);
+    const insertAt = index >= 0 ? index + 1 : days.length;
     startTransition(() => {
-      updateActiveDays((current) => normalizeDayDates([...current.slice(0, index + 1), inserted, ...current.slice(index + 1)]));
+      updateActiveDays((current) => normalizeDayDates([...current.slice(0, insertAt), inserted, ...current.slice(insertAt)]));
       setSelectedDayId(inserted.id);
     });
     flash("已插入新的一天");
@@ -1758,6 +1821,10 @@ export default function Home() {
   }
 
   function removeStop(stopId: string) {
+    if (selectedDay.stops.length <= 1) {
+      flash("至少保留一个地点，不能删除最后一个地点");
+      return;
+    }
     updateSelectedDay((day) => ({ ...day, stops: day.stops.filter((stop) => stop.id !== stopId) }));
     flash("已移除地点");
   }
