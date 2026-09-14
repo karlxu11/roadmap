@@ -33,7 +33,7 @@ npm run deploy
 | `AMAP_JS_KEY` | 变量 | 高德“Web端（JS API）”Key |
 | `AMAP_SECURITY_CODE` | 加密机密 | 高德 JS API 安全密钥 |
 | `AMAP_WEB_SERVICE_KEY` | 加密机密 | 高德“Web服务”Key |
-| `SITE_PASSWORD` | 加密机密 | 打开编辑网站时使用的访问密码；只读分享链接不需要密码 |
+| `SITE_PASSWORD` | 加密机密（可选） | 未启用账号模式时，打开编辑网站使用的访问密码；账号模式使用 `admin`/用户账号登录 |
 | `allowregister` | 变量 | 设置为 `1` 后显示用户注册入口；关闭注册可删除该变量或改为其他值 |
 
 保存变量后重新部署。网站会通过 `/api/amap-config` 自动读取配置；也可以继续在网页设置里使用当前浏览器本地配置。
