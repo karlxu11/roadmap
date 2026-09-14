@@ -48,7 +48,8 @@ const USERNAME_STORAGE_PREFIX = "roadbook-user:username:";
 const USER_STORAGE_PREFIX = "roadbook-user:id:";
 const SESSION_STORAGE_PREFIX = "roadbook-session:";
 const ADMIN_USERNAME = "admin";
-const PASSWORD_HASH_ITERATIONS = 120_000;
+// Cloudflare Workers Web Crypto currently caps PBKDF2 at 100,000 iterations.
+const PASSWORD_HASH_ITERATIONS = 100_000;
 
 type NormalizedRoute = {
   status: "1";
