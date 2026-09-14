@@ -65,9 +65,15 @@ test("registered users receive isolated roadbooks and AMap settings", async () =
     body: JSON.stringify({ username: "bob", password: "bob-pass-123", passwordConfirm: "bob-pass-123", jsKey: "bob-js", securityCode: "bob-security", webKey: "bob-web" }),
   });
   assert.equal(registerBob.status, 201);
+  const bobPayload = await registerBob.json();
   const bobCookie = cookieFrom(registerBob);
+  await env.ROADBOOK_KV.put(`roadbooks:user:${bobPayload.user.id}`, JSON.stringify([
+    { id: "roadbook-69defbdbf04061086bd0cf71" },
+    { id: "roadbook-amap-686f74ae52f2600e6d48cbdd" },
+    { id: "roadbook-amap-6a6ac8888244b107b7cfb234" },
+  ]));
   const bobBooks = await request("/api/roadbooks", { headers: { cookie: bobCookie } });
-  assert.deepEqual((await bobBooks.json()).roadbooks, null);
+  assert.deepEqual((await bobBooks.json()).roadbooks, []);
   const bobConfig = await request("/api/amap-config", { headers: { cookie: bobCookie } });
   assert.deepEqual(await bobConfig.json(), { jsKey: "bob-js", securityCode: "bob-security", webKey: "bob-web" });
 

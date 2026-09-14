@@ -34,6 +34,11 @@ const SESSION_COOKIE = "roadbook_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 const ROADBOOK_STORAGE_KEY = "roadbooks:default";
 const ROADBOOK_USER_STORAGE_PREFIX = "roadbooks:user:";
+const STARTER_ROADBOOK_IDS = new Set([
+  "roadbook-69defbdbf04061086bd0cf71",
+  "roadbook-amap-686f74ae52f2600e6d48cbdd",
+  "roadbook-amap-6a6ac8888244b107b7cfb234",
+]);
 const SHARE_STORAGE_PREFIX = "roadbook-share:";
 const SHARE_INDEX_KEY = "roadbook-shares:index";
 const SHARE_LINK_TTL = 60 * 60 * 24 * 30;
@@ -447,6 +452,12 @@ function userRoadbookStorageKey(userId: string) {
   return `${ROADBOOK_USER_STORAGE_PREFIX}${userId}`;
 }
 
+function isUnmodifiedStarterCollection(value: unknown) {
+  if (!Array.isArray(value) || value.length !== STARTER_ROADBOOK_IDS.size) return false;
+  const ids = value.map((item) => item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string" ? (item as { id: string }).id : "");
+  return new Set(ids).size === STARTER_ROADBOOK_IDS.size && ids.every((id) => STARTER_ROADBOOK_IDS.has(id));
+}
+
 function amapCacheScope(user?: UserRecord | null) {
   return user ? `user:${user.id}:` : "";
 }
@@ -601,6 +612,7 @@ const worker = {
           createdAt: new Date().toISOString(),
         };
         await putUser(env, user);
+        await env.ROADBOOK_KV?.put(userRoadbookStorageKey(user.id), "[]");
         const sessionToken = await createSession(env, user);
         currentUser = user;
         return Response.json({ ok: true, user: publicUser(user) }, { status: 201, headers: { "Set-Cookie": `${SESSION_COOKIE}=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE}`, "Cache-Control": "no-store" } });
@@ -726,6 +738,12 @@ const worker = {
           roadbooks = legacyRoadbooks;
           await env.ROADBOOK_KV.put(storageKey, JSON.stringify(legacyRoadbooks));
         }
+      }
+      // 旧版本曾把三个内置示例写进每个新账号的 KV。只清理这组完全未修改的
+      // 示例，避免误删用户后来创建或编辑过的自有路书。
+      if (accountMode && currentUser && currentUser.username !== ADMIN_USERNAME && isUnmodifiedStarterCollection(roadbooks)) {
+        roadbooks = [];
+        await env.ROADBOOK_KV.put(storageKey, "[]");
       }
       return Response.json({ ok: true, roadbooks: Array.isArray(roadbooks) ? roadbooks : null }, { headers: { "Cache-Control": "no-store" } });
     }

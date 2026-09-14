@@ -113,6 +113,11 @@ const ROADBOOK_DRAFT_META_KEY = "roadbook-library-v1-draft";
 const ACTIVE_ROADBOOK_KEY = "roadbook-last-active-v1";
 const LEGACY_ROADBOOK_KEY = "roadbook-days-v2";
 const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
+const STARTER_ROADBOOK_IDS = new Set([
+  "roadbook-69defbdbf04061086bd0cf71",
+  "roadbook-amap-686f74ae52f2600e6d48cbdd",
+  "roadbook-amap-6a6ac8888244b107b7cfb234",
+]);
 const ROUTE_CACHE_TTL = 24 * 60 * 60 * 1000;
 // 高德偶发限流或网络抖动时，短暂退避后自动补拉，避免路段永远停在“正在计算”。
 const ROUTE_FAILURE_RETRY_TTL = 15 * 1000;
@@ -536,6 +541,12 @@ function ensureImportedRoadbook(roadbooks: Roadbook[]) {
   return { roadbooks: [...additions, ...roadbooks], added: additions.length > 0 };
 }
 
+function isUnmodifiedStarterCollection(roadbooks: Roadbook[]) {
+  return roadbooks.length === STARTER_ROADBOOK_IDS.size
+    && new Set(roadbooks.map((roadbook) => roadbook.id)).size === STARTER_ROADBOOK_IDS.size
+    && roadbooks.every((roadbook) => STARTER_ROADBOOK_IDS.has(roadbook.id));
+}
+
 function loadRoadbooks(storageScope = "legacy"): Roadbook[] {
   if (typeof window === "undefined") return [defaultRoadbook()];
   const libraryKey = scopedStorageKey(ROADBOOK_LIBRARY_KEY, storageScope);
@@ -545,13 +556,16 @@ function loadRoadbooks(storageScope = "legacy"): Roadbook[] {
   if (savedLibrary) {
     try {
       const parsed = JSON.parse(savedLibrary) as Roadbook[];
-      if (Array.isArray(parsed) && parsed.length) return normalizeRoadbookDates(ensureImportedRoadbook(parsed).roadbooks);
+      if (Array.isArray(parsed) && parsed.length) {
+        if (storageScope !== "legacy" && isUnmodifiedStarterCollection(parsed)) return [makeFirstRoadbook()];
+        return normalizeRoadbookDates(storageScope === "legacy" ? ensureImportedRoadbook(parsed).roadbooks : parsed);
+      }
     } catch {
       window.localStorage.removeItem(libraryKey);
       window.localStorage.removeItem(draftMetaKey);
     }
   }
-  const legacy = window.localStorage.getItem(legacyKey);
+  const legacy = storageScope === "legacy" ? window.localStorage.getItem(legacyKey) : null;
   if (legacy) {
     try {
       const parsed = JSON.parse(legacy) as DayPlan[];
@@ -560,7 +574,9 @@ function loadRoadbooks(storageScope = "legacy"): Roadbook[] {
       window.localStorage.removeItem(LEGACY_ROADBOOK_KEY);
     }
   }
-  return normalizeRoadbookDates(ensureImportedRoadbook([defaultRoadbook()]).roadbooks);
+  return storageScope === "legacy"
+    ? normalizeRoadbookDates(ensureImportedRoadbook([defaultRoadbook()]).roadbooks)
+    : [makeFirstRoadbook()];
 }
 
 function loadRoadbookDraftMeta(storageScope = "legacy"): RoadbookDraftMeta {
@@ -621,12 +637,14 @@ function saveLocalShareLinks(links: ShareLink[], storageScope = "legacy") {
   }
 }
 
-async function fetchRemoteRoadbooks() {
+async function fetchRemoteRoadbooks(storageScope = "legacy") {
   const response = await fetch("/api/roadbooks", { headers: { Accept: "application/json" }, cache: "no-store" });
   if (!response.ok) throw new Error(`roadbook-storage-${response.status}`);
   const payload = await response.json() as { roadbooks?: unknown };
-  if (!Array.isArray(payload.roadbooks) || !payload.roadbooks.length) return null;
+  if (!Array.isArray(payload.roadbooks)) return null;
+  if (!payload.roadbooks.length) return { roadbooks: [makeFirstRoadbook()], added: true };
   const normalized = normalizeRoadbookDates(payload.roadbooks as Roadbook[]);
+  if (storageScope !== "legacy") return { roadbooks: normalized, added: false };
   const seeded = ensureImportedRoadbook(normalized);
   return { roadbooks: seeded.roadbooks, added: seeded.added };
 }
@@ -658,6 +676,10 @@ function makeNewRoadbook(title: string, description: string): Roadbook {
     startDate: formatCalendarDate(startDate),
     days: [firstDay],
   };
+}
+
+function makeFirstRoadbook() {
+  return makeNewRoadbook("我的第一条路书", "开始规划你的旅程");
 }
 
 function makeCopiedRoadbook(source: Roadbook, title: string): Roadbook {
@@ -1110,7 +1132,7 @@ export default function Home() {
       setActiveRoadbookId(preferredRoadbook.id);
       setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
     });
-    fetchRemoteRoadbooks().then(async (remotePayload) => {
+    fetchRemoteRoadbooks(storageScope).then(async (remotePayload) => {
       if (cancelled) return;
       if (remotePayload) {
         // 未点击“保存路书”的本地草稿优先于云端快照，避免刷新时丢失编辑。
