@@ -58,6 +58,15 @@ const ADMIN_USERNAME = "admin";
 // Cloudflare Workers Web Crypto currently caps PBKDF2 at 100,000 iterations.
 const PASSWORD_HASH_ITERATIONS = 100_000;
 
+// Static assets do not need account state. Keep their requests out of the
+// authentication path so loading the app shell does not spend KV reads.
+// Admin bootstrap used to inspect several KV keys on every request. A Worker
+// isolate can safely reuse this initialization result until the isolate is
+// recycled.
+const adminBootstrapPromises = new WeakMap<object, Promise<void>>();
+const adminUserCache = new WeakMap<object, { user: UserRecord | null; expiresAt: number }>();
+const ADMIN_USER_CACHE_TTL = 60 * 1000;
+
 type NormalizedRoute = {
   status: "1";
   info: "OK";
@@ -86,7 +95,8 @@ type UserRecord = {
   amap: AMapCredentials;
   createdAt: string;
 };
-type SessionRecord = { userId: string; createdAt: string };
+type SessionUserRecord = Pick<UserRecord, "id" | "username" | "amap" | "createdAt">;
+type SessionRecord = { userId: string; createdAt: string; user?: SessionUserRecord };
 type RoadbookRecord = {
   id: string;
   title: string;
@@ -326,6 +336,20 @@ async function getUserByUsername(env: Env, username: string) {
   return await env.ROADBOOK_KV.get(userByUsernameKey(username), "json") as UserRecord | null;
 }
 
+function kvObject(env: Env) {
+  return env.ROADBOOK_KV as unknown as object | undefined;
+}
+
+async function getAdminUser(env: Env) {
+  const namespace = kvObject(env);
+  if (!env.ROADBOOK_KV || !namespace) return null;
+  const cached = adminUserCache.get(namespace);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
+  const user = await getUserByUsername(env, ADMIN_USERNAME);
+  adminUserCache.set(namespace, { user, expiresAt: Date.now() + ADMIN_USER_CACHE_TTL });
+  return user;
+}
+
 async function getUserById(env: Env, userId: string) {
   if (!env.ROADBOOK_KV || !userId) return null;
   return await env.ROADBOOK_KV.get(userByIdKey(userId), "json") as UserRecord | null;
@@ -338,6 +362,10 @@ async function putUser(env: Env, user: UserRecord) {
     env.ROADBOOK_KV.put(userByUsernameKey(user.username), serialized),
     env.ROADBOOK_KV.put(userByIdKey(user.id), serialized),
   ]);
+  if (user.username === ADMIN_USERNAME) {
+    const namespace = kvObject(env);
+    if (namespace) adminUserCache.set(namespace, { user, expiresAt: Date.now() + ADMIN_USER_CACHE_TTL });
+  }
 }
 
 async function hashPassword(password: string) {
@@ -397,7 +425,7 @@ function publicUser(user: UserRecord) {
 
 async function ensureAdmin(env: Env) {
   if (!env.ROADBOOK_KV) return null;
-  const existing = await getUserByUsername(env, ADMIN_USERNAME);
+  const existing = await getAdminUser(env);
   const envCredentials = envAmapCredentials(env);
   if (!existing) {
     const user: UserRecord = {
@@ -408,8 +436,7 @@ async function ensureAdmin(env: Env) {
       createdAt: new Date().toISOString(),
     };
     await putUser(env, user);
-    await bindAdminStarterRoadbooks(env, user.id);
-    await claimLegacyShareLinks(env, user.id);
+    await ensureAdminData(env, user.id);
     return user;
   }
 
@@ -425,8 +452,7 @@ async function ensureAdmin(env: Env) {
     },
   };
   if (JSON.stringify(next) !== JSON.stringify(existing)) await putUser(env, next);
-  await bindAdminStarterRoadbooks(env, next.id);
-  await claimLegacyShareLinks(env, next.id);
+  await ensureAdminData(env, next.id);
   return next;
 }
 
@@ -483,9 +509,36 @@ async function claimLegacyShareLinks(env: Env, ownerId: string) {
   if (unowned) await writeShareIndex(env, links.map((link) => link.ownerId ? link : { ...link, ownerId }));
 }
 
+async function ensureAdminData(env: Env, adminId: string) {
+  const namespace = kvObject(env);
+  if (!env.ROADBOOK_KV || !namespace) return;
+  let bootstrap = adminBootstrapPromises.get(namespace);
+  if (!bootstrap) {
+    bootstrap = (async () => {
+      await bindAdminStarterRoadbooks(env, adminId);
+      await claimLegacyShareLinks(env, adminId);
+    })();
+    adminBootstrapPromises.set(namespace, bootstrap);
+    bootstrap.catch(() => {
+      if (adminBootstrapPromises.get(namespace) === bootstrap) adminBootstrapPromises.delete(namespace);
+    });
+  }
+  await bootstrap;
+}
+
 async function createSession(env: Env, user: UserRecord) {
   const token = randomToken(32);
-  await env.ROADBOOK_KV?.put(`${SESSION_STORAGE_PREFIX}${token}`, JSON.stringify({ userId: user.id, createdAt: new Date().toISOString() } satisfies SessionRecord), { expirationTtl: SESSION_MAX_AGE });
+  const sessionUser: SessionUserRecord = {
+    id: user.id,
+    username: user.username,
+    amap: user.amap,
+    createdAt: user.createdAt,
+  };
+  await env.ROADBOOK_KV?.put(
+    `${SESSION_STORAGE_PREFIX}${token}`,
+    JSON.stringify({ userId: user.id, user: sessionUser, createdAt: new Date().toISOString() } satisfies SessionRecord),
+    { expirationTtl: SESSION_MAX_AGE },
+  );
   return token;
 }
 
@@ -494,7 +547,44 @@ async function getSessionUser(request: Request, env: Env) {
   const token = getCookie(request, SESSION_COOKIE);
   if (!token || !/^[A-Za-z0-9_-]{32,64}$/.test(token)) return null;
   const session = await env.ROADBOOK_KV.get(`${SESSION_STORAGE_PREFIX}${token}`, "json") as SessionRecord | null;
-  return session?.userId ? getUserById(env, session.userId) : null;
+  if (!session?.userId) return null;
+  // New sessions carry the account data needed by normal requests (but never
+  // the password hash), so an authenticated request only needs one KV read for
+  // the session itself.
+  // Old sessions fall back to the user record and continue to work until they
+  // expire or the user logs in again.
+  if (session.user?.id === session.userId && session.user.username && session.user.amap) {
+    return { ...session.user, passwordHash: "" } satisfies UserRecord;
+  }
+  const user = await getUserById(env, session.userId);
+  // Migrate sessions created before this optimization once, so an existing
+  // login benefits without requiring the user to sign in again.
+  if (user) {
+    try {
+      await refreshSessionUser(env, request, user);
+    } catch {
+      // A migration failure must not turn a valid existing session into a
+      // failed request; the next request can retry it.
+    }
+  }
+  return user;
+}
+
+async function refreshSessionUser(env: Env, request: Request, user: UserRecord) {
+  if (!env.ROADBOOK_KV) return;
+  const token = getCookie(request, SESSION_COOKIE);
+  if (!token || !/^[A-Za-z0-9_-]{32,64}$/.test(token)) return;
+  const sessionUser: SessionUserRecord = {
+    id: user.id,
+    username: user.username,
+    amap: user.amap,
+    createdAt: user.createdAt,
+  };
+  await env.ROADBOOK_KV.put(
+    `${SESSION_STORAGE_PREFIX}${token}`,
+    JSON.stringify({ userId: user.id, user: sessionUser, createdAt: new Date().toISOString() } satisfies SessionRecord),
+    { expirationTtl: SESSION_MAX_AGE },
+  );
 }
 
 async function accountAuthEnabled(env: Env) {
@@ -504,7 +594,7 @@ async function accountAuthEnabled(env: Env) {
   // registration is closed again. A bare KV binding still keeps the legacy
   // single-password mode for existing installations until registration is
   // explicitly enabled.
-  return Boolean(await getUserByUsername(env, ADMIN_USERNAME));
+  return Boolean(await getAdminUser(env));
 }
 
 function userRoadbookStorageKey(userId: string) {
@@ -605,6 +695,10 @@ function isPublicAssetPath(pathname: string) {
   return pathname.startsWith("/_next/") || pathname.startsWith("/_vinext/") || pathname === "/favicon.svg" || pathname === "/favicon.ico";
 }
 
+function isStaticAssetPath(pathname: string) {
+  return pathname !== "/_vinext/image" && isPublicAssetPath(pathname);
+}
+
 function isShareToken(value: string) {
   return /^[A-Za-z0-9_-]{16,64}$/.test(value);
 }
@@ -658,6 +752,12 @@ function accountPage(allowRegister: boolean) {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // The asset server can handle these requests without account state. This
+    // fast path avoids the auth/session KV reads that otherwise happen before
+    // every JavaScript, CSS, and favicon request.
+    if (isStaticAssetPath(url.pathname)) return handler.fetch(request, env, ctx);
+
     const configuredPassword = env.SITE_PASSWORD?.trim();
     const allowRegister = isRegistrationAllowed(env);
     const accountMode = await accountAuthEnabled(env);
@@ -935,6 +1035,7 @@ const worker = {
         },
       };
       await putUser(env, nextUser);
+      await refreshSessionUser(env, request, nextUser);
       currentUser = nextUser;
       return Response.json({ ok: true, jsKey: nextUser.amap.jsKey, securityCode: nextUser.amap.securityCode, webKey: nextUser.amap.webKey }, { headers: { "Cache-Control": "no-store" } });
     }
