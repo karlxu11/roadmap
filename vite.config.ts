@@ -18,9 +18,6 @@ const localBindingConfig = {
   // Keep variables and secrets configured in the Cloudflare dashboard when
   // the generated Wrangler config is deployed.
   keep_vars: true,
-  secrets: {
-    required: ["AMAP_JS_KEY", "AMAP_SECURITY_CODE", "AMAP_WEB_SERVICE_KEY"],
-  },
   compatibility_flags: ["nodejs_compat"],
   d1_databases: d1
     ? [

@@ -30,13 +30,15 @@ npm run deploy
 
 | 名称 | 类型 | 值 |
 | --- | --- | --- |
-| `AMAP_JS_KEY` | 变量 | 高德“Web端（JS API）”Key |
-| `AMAP_SECURITY_CODE` | 加密机密 | 高德 JS API 安全密钥 |
-| `AMAP_WEB_SERVICE_KEY` | 加密机密 | 高德“Web服务”Key |
+| `AMAP_JS_KEY` | 变量（可选） | 首次创建 admin 时使用的高德“Web端（JS API）”Key |
+| `AMAP_SECURITY_CODE` | 加密机密（可选） | 首次创建 admin 时使用的高德 JS API 安全密钥 |
+| `AMAP_WEB_SERVICE_KEY` | 加密机密（可选） | 首次创建 admin 时使用的高德“Web服务”Key |
 | `SITE_PASSWORD` | 加密机密（可选） | 未启用账号模式时，打开编辑网站使用的访问密码；账号模式使用 `admin`/用户账号登录 |
 | `allowregister` | 变量 | 设置为 `1` 后显示用户注册入口；关闭注册可删除该变量或改为其他值 |
 
 保存变量后重新部署。网站会通过 `/api/amap-config` 自动读取配置；也可以继续在网页设置里使用当前浏览器本地配置。
+
+账号模式下，用户注册时会填写自己的 3 项高德凭据并保存到 KV。确认 admin 已经拥有可用的个人高德配置后，上面 3 个全局变量可以删除；首次创建 admin 时如果没有这些变量，需要登录后在「配置地图」中手动填写。
 
 ## 用户注册与账号隔离
 
