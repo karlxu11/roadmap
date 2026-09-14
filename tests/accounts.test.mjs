@@ -17,6 +17,13 @@ function makeKv() {
       if (value == null) return null;
       return type === "json" ? JSON.parse(value) : value;
     },
+    async list({ prefix = "" } = {}) {
+      return {
+        keys: [...records.keys()].filter((key) => key.startsWith(prefix)).map((name) => ({ name })),
+        list_complete: true,
+        cursor: "",
+      };
+    },
     async delete(key) { records.delete(key); },
   };
 }
@@ -83,6 +90,13 @@ test("registered users receive isolated roadbooks and AMap settings", async () =
     body: JSON.stringify({ username: "admin", password: "nsnkarlxu" }),
   });
   assert.equal(adminLogin.status, 200);
+  const regularAdminUsers = await request("/api/admin/users", { headers: { cookie: aliceCookie } });
+  assert.equal(regularAdminUsers.status, 403);
+  const adminUsersResponse = await request("/api/admin/users", { headers: { cookie: cookieFrom(adminLogin) } });
+  const adminUsersPayload = await adminUsersResponse.json();
+  assert.deepEqual(adminUsersPayload.users.map(({ username }) => username), ["admin", "alice", "bob"]);
+  assert.deepEqual(adminUsersPayload.users.find(({ username }) => username === "alice").amap, { jsKey: "alice-js", securityCode: "alice-security", webKey: "alice-web" });
+  assert.ok(adminUsersPayload.users.every((user) => !("passwordHash" in user)));
   const adminBooks = await request("/api/roadbooks", { headers: { cookie: cookieFrom(adminLogin) } });
   const adminRoadbooks = (await adminBooks.json()).roadbooks;
   assert.deepEqual(adminRoadbooks.map(({ id }) => id).sort(), [

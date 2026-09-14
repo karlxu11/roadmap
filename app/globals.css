@@ -653,6 +653,28 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .modal-card h2 { color: #17233f; font-family: inherit; font-size: 23px; font-weight: 800; letter-spacing: -.025em; }
 .modal-close { width: 34px; height: 34px; border-radius: 9px; background: #f2f4f7; color: #7c8797; line-height: 1; }
 .modal-close:hover { background: #e9edf2; color: #27344a; }
+.admin-users-button { height: 36px; padding: 0 11px; border: 1px solid #d9def5; border-radius: 9px; background: #f5f6ff; color: var(--blue); font-size: 11px; font-weight: 700; white-space: nowrap; transition: border-color .18s ease, background .18s ease, color .18s ease; }
+.admin-users-button:hover { border-color: #b9c4f2; background: #edf0ff; color: #2948bd; }
+.admin-users-modal { width: min(820px, 100%); }
+.admin-users-head-actions { display: flex; align-items: center; gap: 9px; color: #7f8a9c; font-size: 11px; }
+.admin-users-lead { margin: 16px 0 21px; color: #738094; font-size: 12px; line-height: 1.7; }
+.admin-user-list { display: grid; gap: 10px; max-height: min(62vh, 540px); overflow: auto; padding-right: 3px; }
+.admin-user-card { padding: 16px; border: 1px solid #e2e6ef; border-radius: 12px; background: #f8fafc; }
+.admin-user-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.admin-user-head > div { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.admin-user-head strong { color: #1d2a42; font-size: 15px; }
+.admin-user-head span { padding: 4px 7px; border-radius: 5px; background: #e9edff; color: var(--blue); font-size: 10px; font-weight: 700; }
+.admin-user-head small { flex-shrink: 0; color: #8792a2; font-size: 11px; }
+.admin-user-id { margin-top: 7px; color: #9aa4b2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.admin-credentials { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 15px; }
+.admin-credentials > div { min-width: 0; padding: 11px; border: 1px solid #e3e8ef; border-radius: 8px; background: #fff; }
+.admin-credentials span { display: block; margin-bottom: 7px; color: #778397; font-size: 11px; font-weight: 700; }
+.admin-credentials code { display: block; min-height: 34px; color: #35435c; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.admin-users-state { min-height: 190px; display: grid; place-content: center; justify-items: center; gap: 8px; color: #8792a2; font-size: 12px; text-align: center; }
+.admin-users-state > span { color: var(--blue); font-size: 27px; }
+.admin-users-state p { margin: 0; }
+.admin-users-state.error > span { color: var(--orange); }
+.admin-users-state .ghost-button { margin-top: 6px; }
 .search-box { border-color: #dfe5ec; border-radius: 11px; background: #f8fafc; }
 .search-box input { background: transparent; font-size: 13px; }
 .search-box button { border-radius: 8px; background: var(--deep); font-size: 11px; }
@@ -679,6 +701,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .share-manager-button, .map-settings-button { width: 36px; padding: 0; overflow: hidden; font-size: 0; }
   .share-manager-button::before { content: "↗"; font-size: 15px; }
   .map-settings-button::before { content: "⌖"; font-size: 16px; }
+  .admin-users-button { width: 36px; padding: 0; overflow: hidden; font-size: 0; }
+  .admin-users-button::before { content: "♙"; font-size: 16px; }
   .editor-pane { padding-right: 30px; padding-left: 30px; }
   .editor-actions { flex-wrap: wrap; justify-content: flex-end; max-width: 250px; }
 }
@@ -695,6 +719,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .brand-name span, .brand-tagline, .new-roadbook-button, .avatar, .share-manager-button { display: none; }
   .top-actions { gap: 5px; }
   .library-button { height: 34px; padding: 0 10px; }
+  .admin-users-button { display: grid; width: 34px; height: 34px; place-items: center; }
   .map-settings-button { display: grid; width: 34px; height: 34px; place-items: center; }
   .workspace { min-height: calc(100vh - 64px); }
   .sidebar { padding: 19px 14px 14px; background: #f5f7fa; }
@@ -734,6 +759,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .mobile-navigation-button:hover { background: #2948bd; }
   .stop-navigation-button { border-color: #dce2ff; border-radius: 7px; background: var(--blue-soft); color: var(--blue); }
   .modal-card { padding: 22px; border-radius: 16px; }
+  .admin-users-modal { padding: 18px; }
+  .admin-users-head-actions > span { display: none; }
+  .admin-user-head { display: block; }
+  .admin-user-head small { display: block; margin-top: 8px; }
+  .admin-credentials { grid-template-columns: 1fr; }
 }
 
 /* Highway service areas between itinerary stops. */

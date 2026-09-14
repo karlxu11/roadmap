@@ -689,6 +689,38 @@ const worker = {
           : Response.json({ ok: false, error: "unauthorized" }, { status: 401, headers: { "Cache-Control": "no-store" } });
       }
 
+      if (url.pathname === "/api/admin/users" && request.method === "GET") {
+        if (!currentUser) return Response.json({ ok: false, error: "unauthorized" }, { status: 401, headers: { "Cache-Control": "no-store" } });
+        if (currentUser.username !== ADMIN_USERNAME) return Response.json({ ok: false, error: "forbidden" }, { status: 403, headers: { "Cache-Control": "no-store" } });
+        if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503, headers: { "Cache-Control": "no-store" } });
+        try {
+          const users: UserRecord[] = [];
+          let cursor = "";
+          do {
+            const page = await env.ROADBOOK_KV.list({ prefix: USERNAME_STORAGE_PREFIX, ...(cursor ? { cursor } : {}) });
+            const records = await Promise.all(page.keys.map((key) => env.ROADBOOK_KV!.get(key.name, "json") as Promise<UserRecord | null>));
+            records.forEach((user) => { if (user?.id && user.username) users.push(user); });
+            cursor = page.list_complete ? "" : page.cursor ?? "";
+          } while (cursor);
+          users.sort((left, right) => left.username.localeCompare(right.username));
+          return Response.json({
+            ok: true,
+            users: users.map((user) => ({
+              id: user.id,
+              username: user.username,
+              createdAt: user.createdAt,
+              amap: {
+                jsKey: user.amap?.jsKey ?? "",
+                securityCode: user.amap?.securityCode ?? "",
+                webKey: user.amap?.webKey ?? "",
+              },
+            })),
+          }, { headers: { "Cache-Control": "no-store" } });
+        } catch {
+          return Response.json({ ok: false, error: "storage_unavailable" }, { status: 503, headers: { "Cache-Control": "no-store" } });
+        }
+      }
+
       if (!currentUser && !isPublicAssetPath(url.pathname) && !await isPublicShareRequest(url, request.method, env) && url.pathname !== "/api/amap-config") return accountPage(allowRegister);
     }
 

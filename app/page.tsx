@@ -66,6 +66,12 @@ type RouteServiceArea = { id?: string; name: string; address: string; type: stri
 type ServiceAreaLegState = { status: "loading" } | { status: "ready"; highway: boolean; items: RouteServiceArea[] } | { status: "error" };
 type ServiceAreaPayload = { status?: string; info?: string; highway?: boolean; serviceAreas?: RouteServiceArea[] };
 type AppUser = { id: string; username: string; displayName: string };
+type AdminUserSummary = {
+  id: string;
+  username: string;
+  createdAt: string;
+  amap: { jsKey: string; securityCode: string; webKey: string };
+};
 
 type AMapInstance = {
   Map: new (container: HTMLElement, options: Record<string, unknown>) => AMapMap;
@@ -804,6 +810,10 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAdminUsers, setShowAdminUsers] = useState(false);
+  const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
+  const [isLoadingAdminUsers, setIsLoadingAdminUsers] = useState(false);
+  const [adminUsersError, setAdminUsersError] = useState("");
   const [showAddPlace, setShowAddPlace] = useState(false);
   const [showLibrary, setShowLibrary] = useState(false);
   const [showCopyRoadbook, setShowCopyRoadbook] = useState(false);
@@ -2163,6 +2173,28 @@ export default function Home() {
     void fetch("/api/auth/logout", { method: "POST", cache: "no-store" }).finally(() => { window.location.href = "/"; });
   }
 
+  async function loadAdminUsers() {
+    if (authUser?.username !== "admin") return;
+    setIsLoadingAdminUsers(true);
+    setAdminUsersError("");
+    try {
+      const response = await fetch("/api/admin/users", { headers: { Accept: "application/json" }, cache: "no-store" });
+      const payload = await response.json().catch(() => ({})) as { users?: AdminUserSummary[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "admin-users-load-failed");
+      setAdminUsers(Array.isArray(payload.users) ? payload.users : []);
+    } catch {
+      setAdminUsersError("暂时无法读取用户资料，请稍后刷新重试。");
+    } finally {
+      setIsLoadingAdminUsers(false);
+    }
+  }
+
+  function openAdminUsers() {
+    if (readOnly || authUser?.username !== "admin") return;
+    setShowAdminUsers(true);
+    void loadAdminUsers();
+  }
+
   const storageStatusLabel = storageStatus === "remote"
     ? "已同步到云端"
     : storageStatus === "saving"
@@ -2189,7 +2221,7 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          {readOnly ? <><div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><div className="top-system-status"><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></div><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" onClick={logoutAccount} aria-label={authUser ? `退出 ${authUser.username}` : "用户菜单"} title={authUser ? `当前账号：${authUser.username}，点击退出` : undefined}>{authUser?.username.slice(0, 1).toUpperCase() ?? "Y"}</button></>}
+          {readOnly ? <><div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button>{authUser?.username === "admin" && <button className="admin-users-button" type="button" onClick={openAdminUsers}>用户管理</button>}<div className="top-system-status"><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></div><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" onClick={logoutAccount} aria-label={authUser ? `退出 ${authUser.username}` : "用户菜单"} title={authUser ? `当前账号：${authUser.username}，点击退出` : undefined}>{authUser?.username.slice(0, 1).toUpperCase() ?? "Y"}</button></>}
         </div>
       </header>
 
@@ -2322,6 +2354,7 @@ export default function Home() {
       {showLibrary && <RoadbookLibraryModal roadbooks={roadbooks} activeRoadbookId={activeRoadbookId} onClose={() => setShowLibrary(false)} onSelect={openRoadbook} onCreate={createRoadbook} onDelete={deleteRoadbook} />}
       {showCopyRoadbook && <CopyRoadbookModal sourceTitle={activeRoadbook.title} onClose={() => setShowCopyRoadbook(false)} onSave={copyRoadbook} />}
       {showShareManager && <ShareManagerModal links={shareLinks} isLoading={isLoadingShareLinks} onClose={() => setShowShareManager(false)} onRefresh={() => void refreshShareLinks()} onCopy={(link) => void copyShareLink(link)} onRevoke={(link) => void revokeShareLink(link)} />}
+      {showAdminUsers && <AdminUsersModal users={adminUsers} isLoading={isLoadingAdminUsers} error={adminUsersError} onClose={() => setShowAdminUsers(false)} onRefresh={() => void loadAdminUsers()} />}
       {showAddPlace && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowAddPlace(false)}><div className="modal-card add-modal"><div className="modal-head"><div><span className="eyebrow">ADD A PLACE</span><h2>把想去的地方放进来</h2></div><button type="button" className="modal-close" onClick={() => setShowAddPlace(false)}>×</button></div><div className="search-box"><span>⌕</span><input value={query} placeholder="搜索景点、餐厅或酒店" onChange={(event) => { setQuery(event.target.value); schedulePlaceSearch(event.target.value); }} onKeyDown={(event) => event.key === "Enter" && (event.preventDefault(), searchPlacesImmediately(event.currentTarget.value))} /><button type="button" onClick={() => searchPlacesImmediately()}>搜索</button></div><div className="search-results">{searchResults.length ? searchResults.map((result) => <button className="search-result" type="button" key={result.id} onClick={() => addSearchResult(result)}><span className="result-pin">⌖</span><span><strong>{result.name}</strong><small>{formatSearchResultMeta(result)}</small></span><span className="result-add">＋</span></button>) : <div className="empty-results"><span>⌖</span><p>{query ? "正在结合当前行程位置搜索，或按回车立即搜索" : "搜索一个地点，加入第 " + (days.findIndex((day) => day.id === selectedDayId) + 1) + " 天"}</p></div>}</div><div className="modal-foot">搜索会结合当天行程位置、城市和全国结果，并优先显示名称最匹配的地点。</div></div></div>}
 
       {showCumulativeTolls && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowCumulativeTolls(false)}><div className="modal-card cumulative-tolls-modal" role="dialog" aria-modal="true" aria-labelledby="cumulative-tolls-title"><div className="modal-head"><div><span className="eyebrow">TOLL CALCULATOR</span><h2 id="cumulative-tolls-title">截至第 {selectedDayIndex + 1} 天</h2></div><button type="button" className="modal-close" onClick={() => setShowCumulativeTolls(false)} aria-label="关闭累计高速费">×</button></div><p className="cumulative-tolls-lead">从 {days[0]?.date ?? "出发日"} 出发，累计计算到 {selectedDay.date} 的所有行程高速费。</p><div className="cumulative-tolls-total"><span>累计高速费</span><strong>{cumulativeTollsComplete ? formatTolls(cumulativeTollsAmount) : readOnly ? "未记录" : amapLoaded ? "正在计算…" : "待获取"}</strong></div><div className="cumulative-tolls-list">{cumulativeTollDays.map(({ day, complete, amount }, index) => <div className="cumulative-toll-row" key={day.id}><div><strong>第 {index + 1} 天 · {day.date}</strong><small>{day.title}</small></div><span>{complete ? formatTolls(amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span></div>)}</div>{!cumulativeTollsComplete && !readOnly && !amapLoaded && <div className="modal-foot">请先连接高德地图，路线规划完成后再次打开这里即可看到累计高速费。</div>}<div className="modal-actions"><button className="primary-button" type="button" onClick={() => setShowCumulativeTolls(false)}>知道了 <span>→</span></button></div></div></div>}
@@ -2362,6 +2395,15 @@ function PrintRoadbook({ roadbook, routeCache }: { roadbook: Roadbook; routeCach
     })}
     <footer className="print-footer">路书 · ROAM NOTE | 由高德路线数据辅助整理</footer>
   </div>;
+}
+
+function formatAdminDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "未知" : date.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function AdminUsersModal({ users, isLoading, error, onClose, onRefresh }: { users: AdminUserSummary[]; isLoading: boolean; error: string; onClose: () => void; onRefresh: () => void }) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card admin-users-modal" role="dialog" aria-modal="true" aria-labelledby="admin-users-title"><div className="modal-head"><div><span className="eyebrow">ADMIN CONSOLE</span><h2 id="admin-users-title">用户管理</h2></div><div className="admin-users-head-actions"><span>{users.length} 个账号</span><button className="refresh-share-button" type="button" onClick={onRefresh} aria-label="刷新用户资料">↻</button><button type="button" className="modal-close" onClick={onClose} aria-label="关闭用户管理">×</button></div></div><p className="admin-users-lead">查看账号注册信息和各自绑定的高德凭据。密码不会显示，也不会返回到页面。</p>{isLoading && !users.length ? <div className="admin-users-state"><span>…</span><p>正在读取用户资料</p></div> : error ? <div className="admin-users-state error"><span>!</span><p>{error}</p><button className="ghost-button" type="button" onClick={onRefresh}>重新读取</button></div> : users.length ? <div className="admin-user-list">{users.map((user) => <article className="admin-user-card" key={user.id}><div className="admin-user-head"><div><strong>{user.username}</strong><span>{user.username === "admin" ? "管理员" : "注册用户"}</span></div><small>注册于 {formatAdminDate(user.createdAt)}</small></div><div className="admin-user-id">账号 ID：{user.id}</div><div className="admin-credentials"><div><span>Web 端（JS API）Key</span><code>{user.amap.jsKey || "未配置"}</code></div><div><span>securityJsCode / 安全密钥</span><code>{user.amap.securityCode || "未配置"}</code></div><div><span>Web 服务 Key</span><code>{user.amap.webKey || "未配置"}</code></div></div></article>)}</div> : <div className="admin-users-state"><span>◎</span><p>还没有注册用户</p></div>}<div className="modal-foot">高德凭据仅供管理员查看。若用户需要更换配置，请让用户登录后在“配置地图”中自行修改。</div></div></div>;
 }
 
 function RoadbookLibraryModal({ roadbooks, activeRoadbookId, onClose, onSelect, onCreate, onDelete }: { roadbooks: Roadbook[]; activeRoadbookId: string; onClose: () => void; onSelect: (id: string) => void; onCreate: (title: string, description: string) => void; onDelete: (id: string) => void }) {
