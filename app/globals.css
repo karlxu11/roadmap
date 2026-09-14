@@ -665,6 +665,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .admin-user-head strong { color: #1d2a42; font-size: 15px; }
 .admin-user-head span { padding: 4px 7px; border-radius: 5px; background: #e9edff; color: var(--blue); font-size: 10px; font-weight: 700; }
 .admin-user-head small { flex-shrink: 0; color: #8792a2; font-size: 11px; }
+.admin-user-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+.admin-current-user { padding: 4px 7px; border-radius: 5px; background: #eef2f6; color: #8792a2; font-size: 10px; }
+.admin-delete-user-button { padding: 7px 9px; border: 1px solid #f0d9d2; border-radius: 7px; background: #fff8f6; color: #b35d48; font-size: 10px; font-weight: 700; }
+.admin-delete-user-button:hover:not(:disabled) { border-color: #e6b4a4; background: #fff0ec; color: #a84f39; }
+.admin-delete-user-button:disabled { cursor: wait; opacity: .55; }
 .admin-user-id { margin-top: 7px; color: #9aa4b2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
 .admin-credentials { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 15px; }
 .admin-credentials > div { min-width: 0; padding: 11px; border: 1px solid #e3e8ef; border-radius: 8px; background: #fff; }
@@ -763,6 +768,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .admin-users-head-actions > span { display: none; }
   .admin-user-head { display: block; }
   .admin-user-head small { display: block; margin-top: 8px; }
+  .admin-user-actions { justify-content: flex-start; margin-top: 8px; }
   .admin-credentials { grid-template-columns: 1fr; }
 }
 

@@ -555,6 +555,48 @@ async function readShareIndex(env: Env) {
     && typeof (item as ShareLinkRecord).expiresAt === "string"));
 }
 
+async function listKvKeys(env: Env, prefix: string) {
+  if (!env.ROADBOOK_KV) return [] as string[];
+  const keys: string[] = [];
+  let cursor = "";
+  do {
+    const page = await env.ROADBOOK_KV.list({ prefix, ...(cursor ? { cursor } : {}) });
+    keys.push(...page.keys.map((key) => key.name));
+    cursor = page.list_complete ? "" : page.cursor ?? "";
+  } while (cursor);
+  return keys;
+}
+
+async function deleteKvKeys(env: Env, keys: string[]) {
+  if (!env.ROADBOOK_KV || !keys.length) return;
+  await Promise.all(keys.map((key) => env.ROADBOOK_KV!.delete(key)));
+}
+
+async function deleteUserSessions(env: Env, userId: string) {
+  if (!env.ROADBOOK_KV) return;
+  const sessionKeys = await listKvKeys(env, SESSION_STORAGE_PREFIX);
+  const sessions = await Promise.all(sessionKeys.map((key) => env.ROADBOOK_KV!.get(key, "json") as Promise<SessionRecord | null>));
+  await deleteKvKeys(env, sessionKeys.filter((_, index) => sessions[index]?.userId === userId));
+}
+
+async function deleteUserData(env: Env, user: UserRecord) {
+  if (!env.ROADBOOK_KV) return;
+  const ownedLinks = (await readShareIndex(env)).filter((link) => link.ownerId === user.id);
+  await Promise.all([
+    env.ROADBOOK_KV.delete(userByUsernameKey(user.username)),
+    env.ROADBOOK_KV.delete(userByIdKey(user.id)),
+    env.ROADBOOK_KV.delete(userRoadbookStorageKey(user.id)),
+    deleteUserSessions(env, user.id),
+    deleteKvKeys(env, [
+      ...await listKvKeys(env, `${AMAP_ROUTE_CACHE_PREFIX}user:${user.id}:`),
+      ...await listKvKeys(env, `${AMAP_SEARCH_CACHE_PREFIX}user:${user.id}:`),
+      ...await listKvKeys(env, `${AMAP_SERVICE_AREA_CACHE_PREFIX}user:${user.id}:`),
+      ...ownedLinks.map((link) => `${SHARE_STORAGE_PREFIX}${link.token}`),
+    ]),
+  ]);
+  if (ownedLinks.length) await writeShareIndex(env, (await readShareIndex(env)).filter((link) => link.ownerId !== user.id));
+}
+
 async function writeShareIndex(env: Env, links: ShareLinkRecord[]) {
   if (env.ROADBOOK_KV) await env.ROADBOOK_KV.put(SHARE_INDEX_KEY, JSON.stringify(links));
 }
@@ -716,6 +758,23 @@ const worker = {
               },
             })),
           }, { headers: { "Cache-Control": "no-store" } });
+        } catch {
+          return Response.json({ ok: false, error: "storage_unavailable" }, { status: 503, headers: { "Cache-Control": "no-store" } });
+        }
+      }
+
+      if (url.pathname === "/api/admin/users" && request.method === "DELETE") {
+        if (!currentUser) return Response.json({ ok: false, error: "unauthorized" }, { status: 401, headers: { "Cache-Control": "no-store" } });
+        if (currentUser.username !== ADMIN_USERNAME) return Response.json({ ok: false, error: "forbidden" }, { status: 403, headers: { "Cache-Control": "no-store" } });
+        if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503, headers: { "Cache-Control": "no-store" } });
+        const userId = url.searchParams.get("userId")?.trim() ?? "";
+        if (!/^[A-Za-z0-9_-]{3,100}$/.test(userId)) return Response.json({ ok: false, error: "invalid_user" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+        const target = await getUserById(env, userId);
+        if (!target) return Response.json({ ok: false, error: "user_not_found" }, { status: 404, headers: { "Cache-Control": "no-store" } });
+        if (target.id === currentUser.id || target.username === ADMIN_USERNAME) return Response.json({ ok: false, error: "cannot_delete_admin" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+        try {
+          await deleteUserData(env, target);
+          return Response.json({ ok: true, user: { id: target.id, username: target.username } }, { headers: { "Cache-Control": "no-store" } });
         } catch {
           return Response.json({ ok: false, error: "storage_unavailable" }, { status: 503, headers: { "Cache-Control": "no-store" } });
         }

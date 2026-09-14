@@ -95,8 +95,24 @@ test("registered users receive isolated roadbooks and AMap settings", async () =
   const adminUsersResponse = await request("/api/admin/users", { headers: { cookie: cookieFrom(adminLogin) } });
   const adminUsersPayload = await adminUsersResponse.json();
   assert.deepEqual(adminUsersPayload.users.map(({ username }) => username), ["admin", "alice", "bob"]);
-  assert.deepEqual(adminUsersPayload.users.find(({ username }) => username === "alice").amap, { jsKey: "alice-js", securityCode: "alice-security", webKey: "alice-web" });
+  const aliceAdminUser = adminUsersPayload.users.find(({ username }) => username === "alice");
+  const adminUser = adminUsersPayload.users.find(({ username }) => username === "admin");
+  assert.deepEqual(aliceAdminUser.amap, { jsKey: "alice-js", securityCode: "alice-security", webKey: "alice-web" });
   assert.ok(adminUsersPayload.users.every((user) => !("passwordHash" in user)));
+  const regularDelete = await request(`/api/admin/users?userId=${encodeURIComponent(aliceAdminUser.id)}`, { method: "DELETE", headers: { cookie: bobCookie } });
+  assert.equal(regularDelete.status, 403);
+  const adminDelete = await request(`/api/admin/users?userId=${encodeURIComponent(adminUser.id)}`, { method: "DELETE", headers: { cookie: cookieFrom(adminLogin) } });
+  assert.equal(adminDelete.status, 400);
+  const deleteAlice = await request(`/api/admin/users?userId=${encodeURIComponent(aliceAdminUser.id)}`, { method: "DELETE", headers: { cookie: cookieFrom(adminLogin) } });
+  assert.equal(deleteAlice.status, 200);
+  const usersAfterDelete = await request("/api/admin/users", { headers: { cookie: cookieFrom(adminLogin) } });
+  assert.deepEqual((await usersAfterDelete.json()).users.map(({ username }) => username), ["admin", "bob"]);
+  const aliceLoginAfterDelete = await request("/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "alice", password: "alice-pass-123" }),
+  });
+  assert.equal(aliceLoginAfterDelete.status, 401);
   const adminBooks = await request("/api/roadbooks", { headers: { cookie: cookieFrom(adminLogin) } });
   const adminRoadbooks = (await adminBooks.json()).roadbooks;
   assert.deepEqual(adminRoadbooks.map(({ id }) => id).sort(), [
