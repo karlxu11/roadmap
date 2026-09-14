@@ -65,6 +65,7 @@ type AMapWebSearchPayload = { status?: string; info?: string; pois?: AMapWebSear
 type RouteServiceArea = { id?: string; name: string; address: string; type: string; lng: number; lat: number; distanceFromStart: number; distanceToRoute: number };
 type ServiceAreaLegState = { status: "loading" } | { status: "ready"; highway: boolean; items: RouteServiceArea[] } | { status: "error" };
 type ServiceAreaPayload = { status?: string; info?: string; highway?: boolean; serviceAreas?: RouteServiceArea[] };
+type AppUser = { id: string; username: string; displayName: string };
 
 type AMapInstance = {
   Map: new (container: HTMLElement, options: Record<string, unknown>) => AMapMap;
@@ -126,6 +127,10 @@ const SHARE_QUERY_KEY = "share";
 const SHARE_LINKS_KEY = "roadbook-share-links-v1";
 const SHARE_LINK_TTL = 30 * 24 * 60 * 60 * 1000;
 
+function scopedStorageKey(key: string, scope = "legacy") {
+  return scope === "legacy" ? key : `${key}:${scope}`;
+}
+
 type CachedLeg = { distance?: number; duration?: number; tolls?: number | null; path?: Array<[number, number]>; cachedAt: number };
 type RouteCache = { legs: Record<string, CachedLeg>; paths: Record<string, Array<[number, number]>>; errors: Record<string, number> };
 type RouteApiPayload = { status?: string; info?: string; route?: { distance?: number; duration?: number; tolls?: number | null; path?: Array<[number, number]> } };
@@ -156,11 +161,11 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, task: (item: 
   return results;
 }
 
-function loadRouteCache(): RouteCache {
+function loadRouteCache(storageScope = "legacy"): RouteCache {
   if (typeof window === "undefined") return { legs: {}, paths: {}, errors: {} };
   try {
     const now = Date.now();
-    const parsed = JSON.parse(window.localStorage.getItem(ROUTE_CACHE_KEY) ?? "null") as Partial<RouteCache> | null;
+    const parsed = JSON.parse(window.localStorage.getItem(scopedStorageKey(ROUTE_CACHE_KEY, storageScope)) ?? "null") as Partial<RouteCache> | null;
     const legs = Object.fromEntries(Object.entries(parsed?.legs ?? {}).flatMap(([key, value]) => {
       if (!value || typeof value !== "object") return [];
       const candidate = value as Partial<CachedLeg>;
@@ -184,7 +189,7 @@ function loadRouteCache(): RouteCache {
   }
 }
 
-function saveRouteCache(cache: RouteCache) {
+function saveRouteCache(cache: RouteCache, storageScope = "legacy") {
   const compactLegs = Object.fromEntries(Object.entries(cache.legs).map(([key, leg]) => [key, {
     distance: leg.distance,
     duration: leg.duration,
@@ -195,17 +200,17 @@ function saveRouteCache(cache: RouteCache) {
   const compactPaths = Object.fromEntries(Object.entries(cache.paths).map(([key, path]) => [key, sampleRoutePath(path, ROUTE_CACHE_PATH_MAX_POINTS)]));
   const compactCache: RouteCache = { legs: compactLegs, paths: compactPaths, errors: cache.errors };
   try {
-    window.localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(compactCache));
+    window.localStorage.setItem(scopedStorageKey(ROUTE_CACHE_KEY, storageScope), JSON.stringify(compactCache));
   } catch {
     // 轨迹点可能让 localStorage 超限；清掉旧的大对象后只保留指标，避免刷新后全部重算。
     try {
-      window.localStorage.removeItem(ROUTE_CACHE_KEY);
+      window.localStorage.removeItem(scopedStorageKey(ROUTE_CACHE_KEY, storageScope));
       const metricsOnly = {
         legs: Object.fromEntries(Object.entries(compactLegs).map(([key, leg]) => [key, { distance: leg.distance, duration: leg.duration, tolls: leg.tolls, cachedAt: leg.cachedAt }])),
         paths: {},
         errors: cache.errors,
       } satisfies RouteCache;
-      window.localStorage.setItem(ROUTE_CACHE_KEY, JSON.stringify(metricsOnly));
+      window.localStorage.setItem(scopedStorageKey(ROUTE_CACHE_KEY, storageScope), JSON.stringify(metricsOnly));
     } catch {
       // Route data is only a disposable optimization cache.
     }
@@ -357,10 +362,6 @@ function isCloudShareToken(value: string) {
 
 function expectedShareLegCount(roadbook: Roadbook) {
   return roadbook.days.reduce((count, day) => count + Math.max(day.stops.length - 1, 0), 0);
-}
-
-function expectedSharePathCount(roadbook: Roadbook) {
-  return roadbook.days.filter((day) => day.stops.length >= 2).length;
 }
 
 function hasDetailedSharePath(path: Array<[number, number]> | undefined, stops: Stop[]) {
@@ -535,19 +536,22 @@ function ensureImportedRoadbook(roadbooks: Roadbook[]) {
   return { roadbooks: [...additions, ...roadbooks], added: additions.length > 0 };
 }
 
-function loadRoadbooks(): Roadbook[] {
+function loadRoadbooks(storageScope = "legacy"): Roadbook[] {
   if (typeof window === "undefined") return [defaultRoadbook()];
-  const savedLibrary = window.localStorage.getItem(ROADBOOK_LIBRARY_KEY);
+  const libraryKey = scopedStorageKey(ROADBOOK_LIBRARY_KEY, storageScope);
+  const draftMetaKey = scopedStorageKey(ROADBOOK_DRAFT_META_KEY, storageScope);
+  const legacyKey = storageScope === "legacy" ? LEGACY_ROADBOOK_KEY : scopedStorageKey(LEGACY_ROADBOOK_KEY, storageScope);
+  const savedLibrary = window.localStorage.getItem(libraryKey);
   if (savedLibrary) {
     try {
       const parsed = JSON.parse(savedLibrary) as Roadbook[];
       if (Array.isArray(parsed) && parsed.length) return normalizeRoadbookDates(ensureImportedRoadbook(parsed).roadbooks);
     } catch {
-      window.localStorage.removeItem(ROADBOOK_LIBRARY_KEY);
-      window.localStorage.removeItem(ROADBOOK_DRAFT_META_KEY);
+      window.localStorage.removeItem(libraryKey);
+      window.localStorage.removeItem(draftMetaKey);
     }
   }
-  const legacy = window.localStorage.getItem(LEGACY_ROADBOOK_KEY);
+  const legacy = window.localStorage.getItem(legacyKey);
   if (legacy) {
     try {
       const parsed = JSON.parse(legacy) as DayPlan[];
@@ -559,49 +563,49 @@ function loadRoadbooks(): Roadbook[] {
   return normalizeRoadbookDates(ensureImportedRoadbook([defaultRoadbook()]).roadbooks);
 }
 
-function loadRoadbookDraftMeta(): RoadbookDraftMeta {
+function loadRoadbookDraftMeta(storageScope = "legacy"): RoadbookDraftMeta {
   if (typeof window === "undefined") return { dirty: false, updatedAt: 0 };
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(ROADBOOK_DRAFT_META_KEY) ?? "null") as Partial<RoadbookDraftMeta> | null;
+    const parsed = JSON.parse(window.localStorage.getItem(scopedStorageKey(ROADBOOK_DRAFT_META_KEY, storageScope)) ?? "null") as Partial<RoadbookDraftMeta> | null;
     return {
       dirty: parsed?.dirty === true,
       updatedAt: typeof parsed?.updatedAt === "number" && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : 0,
     };
   } catch {
-    window.localStorage.removeItem(ROADBOOK_DRAFT_META_KEY);
+    window.localStorage.removeItem(scopedStorageKey(ROADBOOK_DRAFT_META_KEY, storageScope));
     return { dirty: false, updatedAt: 0 };
   }
 }
 
-function preferredRoadbookId(roadbooks: Roadbook[]) {
+function preferredRoadbookId(roadbooks: Roadbook[], storageScope = "legacy") {
   if (typeof window === "undefined") return roadbooks[0]?.id ?? "";
-  const savedId = window.localStorage.getItem(ACTIVE_ROADBOOK_KEY);
+  const savedId = window.localStorage.getItem(scopedStorageKey(ACTIVE_ROADBOOK_KEY, storageScope));
   return roadbooks.some((roadbook) => roadbook.id === savedId) ? savedId! : roadbooks[0]?.id ?? "";
 }
 
-function rememberActiveRoadbook(id: string) {
+function rememberActiveRoadbook(id: string, storageScope = "legacy") {
   if (typeof window === "undefined" || !id) return;
   try {
-    window.localStorage.setItem(ACTIVE_ROADBOOK_KEY, id);
+    window.localStorage.setItem(scopedStorageKey(ACTIVE_ROADBOOK_KEY, storageScope), id);
   } catch {
     // 当前路书只是设备偏好；存储不可用时仍可正常编辑。
   }
 }
 
-function saveRoadbooks(roadbooks: Roadbook[], dirty = true) {
+function saveRoadbooks(roadbooks: Roadbook[], dirty = true, storageScope = "legacy") {
   try {
-    window.localStorage.setItem(ROADBOOK_LIBRARY_KEY, JSON.stringify(roadbooks));
-    window.localStorage.setItem(ROADBOOK_DRAFT_META_KEY, JSON.stringify({ dirty, updatedAt: Date.now() } satisfies RoadbookDraftMeta));
+    window.localStorage.setItem(scopedStorageKey(ROADBOOK_LIBRARY_KEY, storageScope), JSON.stringify(roadbooks));
+    window.localStorage.setItem(scopedStorageKey(ROADBOOK_DRAFT_META_KEY, storageScope), JSON.stringify({ dirty, updatedAt: Date.now() } satisfies RoadbookDraftMeta));
     return true;
   } catch {
     return false;
   }
 }
 
-function loadLocalShareLinks(): ShareLink[] {
+function loadLocalShareLinks(storageScope = "legacy"): ShareLink[] {
   if (typeof window === "undefined") return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(SHARE_LINKS_KEY) ?? "[]") as ShareLink[];
+    const parsed = JSON.parse(window.localStorage.getItem(scopedStorageKey(SHARE_LINKS_KEY, storageScope)) ?? "[]") as ShareLink[];
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((item) => item && typeof item.url === "string" && typeof item.roadbookTitle === "string");
   } catch {
@@ -609,9 +613,9 @@ function loadLocalShareLinks(): ShareLink[] {
   }
 }
 
-function saveLocalShareLinks(links: ShareLink[]) {
+function saveLocalShareLinks(links: ShareLink[], storageScope = "legacy") {
   try {
-    window.localStorage.setItem(SHARE_LINKS_KEY, JSON.stringify(links));
+    window.localStorage.setItem(scopedStorageKey(SHARE_LINKS_KEY, storageScope), JSON.stringify(links));
   } catch {
     // Share management is a convenience cache; the cloud index remains authoritative when configured.
   }
@@ -680,9 +684,9 @@ function cacheRoadbookPaths(roadbook: Roadbook, cache: RouteCache) {
   });
 }
 
-function loadSavedSettings() {
+function loadSavedSettings(storageScope = "legacy") {
   if (typeof window === "undefined") return { jsKey: "", securityCode: "", webKey: "" };
-  const saved = window.localStorage.getItem("roadbook-amap-settings");
+  const saved = window.localStorage.getItem(scopedStorageKey("roadbook-amap-settings", storageScope));
   if (!saved) return { jsKey: "", securityCode: "", webKey: "" };
   try {
     return JSON.parse(saved) as { jsKey: string; securityCode: string; webKey: string };
@@ -765,6 +769,8 @@ function amapStopNavigationUrl(stop: Stop) {
 export default function Home() {
   const [roadbooks, setRoadbooksState] = useState<Roadbook[]>(() => [defaultRoadbook()]);
   const [activeRoadbookId, setActiveRoadbookId] = useState(() => defaultRoadbook().id);
+  const [authUser, setAuthUser] = useState<AppUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const activeRoadbook = roadbooks.find((roadbook) => roadbook.id === activeRoadbookId) ?? roadbooks[0];
   const starterTrip = activeRoadbook;
   const days = activeRoadbook.days;
@@ -821,6 +827,12 @@ export default function Home() {
   const searchAbortRef = useRef<AbortController | null>(null);
   const searchRequestIdRef = useRef(0);
   const searchDebounceRef = useRef<number | null>(null);
+
+  const storageScope = authUser?.id ?? "legacy";
+  const storageScopeRef = useRef(storageScope);
+  useEffect(() => {
+    storageScopeRef.current = storageScope;
+  }, [storageScope]);
 
   const selectedDay = days.find((day) => day.id === selectedDayId) ?? days[0];
   const selectedDayIndex = Math.max(days.findIndex((day) => day.id === selectedDayId), 0);
@@ -964,7 +976,7 @@ export default function Home() {
     localRoadbookSaveTimerRef.current = null;
     const pending = pendingLocalRoadbooksRef.current;
     pendingLocalRoadbooksRef.current = null;
-    if (pending && !saveRoadbooks(pending, true)) setStorageStatus("unavailable");
+    if (pending && !saveRoadbooks(pending, true, storageScopeRef.current)) setStorageStatus("unavailable");
   }
 
   function scheduleLocalRoadbookSave(next: Roadbook[]) {
@@ -974,7 +986,7 @@ export default function Home() {
       localRoadbookSaveTimerRef.current = null;
       const pending = pendingLocalRoadbooksRef.current;
       pendingLocalRoadbooksRef.current = null;
-      if (pending && !saveRoadbooks(pending, true)) setStorageStatus("unavailable");
+      if (pending && !saveRoadbooks(pending, true, storageScopeRef.current)) setStorageStatus("unavailable");
     }, ROADBOOK_LOCAL_SAVE_DELAY);
   }
 
@@ -996,14 +1008,14 @@ export default function Home() {
     if (handle.kind === "idle") window.cancelIdleCallback(handle.id);
     else window.clearTimeout(handle.id);
     routeCacheSaveHandleRef.current = null;
-    saveRouteCache(routeCacheRef.current);
+    saveRouteCache(routeCacheRef.current, storageScopeRef.current);
   }
 
   function scheduleRouteCacheSave() {
     if (routeCacheSaveHandleRef.current) return;
     const persist = () => {
       routeCacheSaveHandleRef.current = null;
-      saveRouteCache(routeCacheRef.current);
+      saveRouteCache(routeCacheRef.current, storageScopeRef.current);
     };
     if (typeof window.requestIdleCallback === "function") {
       routeCacheSaveHandleRef.current = {
@@ -1016,7 +1028,27 @@ export default function Home() {
   }
 
   useEffect(() => {
+    if (hasShareQuery()) {
+      queueMicrotask(() => setAuthReady(true));
+      return;
+    }
     let cancelled = false;
+    fetch("/api/auth/me", { headers: { Accept: "application/json" }, cache: "no-store" })
+      .then(async (response) => response.ok ? await response.json() as { user?: AppUser } : null)
+      .then((payload) => {
+        if (cancelled) return;
+        if (payload?.user?.id && payload.user.username) setAuthUser(payload.user);
+        setAuthReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthReady(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!authReady) return;
     if (hasShareQuery()) {
       const encodedShare = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get(SHARE_QUERY_KEY) ?? "";
       const inlineShare = decodeShareSnapshot(encodedShare);
@@ -1067,12 +1099,12 @@ export default function Home() {
         if (pollTimer !== null) window.clearInterval(pollTimer);
       };
     }
-    const localRoadbooks = loadRoadbooks();
-    const localDraft = loadRoadbookDraftMeta();
+    const localRoadbooks = loadRoadbooks(storageScope);
+    const localDraft = loadRoadbookDraftMeta(storageScope);
     localDraftDirtyRef.current = localDraft.dirty;
     queueMicrotask(() => {
       if (cancelled) return;
-      const preferredId = preferredRoadbookId(localRoadbooks);
+      const preferredId = preferredRoadbookId(localRoadbooks, storageScope);
       const preferredRoadbook = localRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? localRoadbooks[0];
       setRoadbooksState(localRoadbooks);
       setActiveRoadbookId(preferredRoadbook.id);
@@ -1087,10 +1119,10 @@ export default function Home() {
           return;
         }
         const remoteRoadbooks = remotePayload.roadbooks;
-        const preferredId = preferredRoadbookId(remoteRoadbooks);
+        const preferredId = preferredRoadbookId(remoteRoadbooks, storageScope);
         const preferredRoadbook = remoteRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? remoteRoadbooks[0];
         setRoadbooksState(remoteRoadbooks);
-        saveRoadbooks(remoteRoadbooks, false);
+        saveRoadbooks(remoteRoadbooks, false, storageScope);
         localDraftDirtyRef.current = false;
         setActiveRoadbookId(preferredRoadbook.id);
         setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
@@ -1102,11 +1134,11 @@ export default function Home() {
         setStorageStatus("local");
         return;
       }
-      saveRoadbooks(localRoadbooks, false);
+      saveRoadbooks(localRoadbooks, false, storageScope);
       const seeded = await saveRemoteRoadbooks(localRoadbooks);
       if (cancelled) return;
       if (seeded) {
-        saveRoadbooks(localRoadbooks, false);
+        saveRoadbooks(localRoadbooks, false, storageScope);
         localDraftDirtyRef.current = false;
       }
       setStorageStatus(seeded ? "remote" : "unavailable");
@@ -1114,17 +1146,17 @@ export default function Home() {
       if (!cancelled) setStorageStatus(localDraftDirtyRef.current ? "local" : "unavailable");
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [authReady, storageScope]);
 
   useEffect(() => {
     queueMicrotask(() => {
-      setSettings(loadSavedSettings());
-      const cache = loadRouteCache();
+      setSettings(loadSavedSettings(storageScope));
+      const cache = loadRouteCache(storageScope);
       routeCacheRef.current = cache;
       setRouteCacheLegs(cache.legs);
       setRouteCacheVersion((version) => version + 1);
     });
-  }, []);
+  }, [storageScope]);
 
   useEffect(() => {
     const handleBeforePrint = () => {
@@ -1172,15 +1204,15 @@ export default function Home() {
     fetch("/api/amap-config")
       .then((response) => response.ok ? response.json() as Promise<{ jsKey?: string; securityCode?: string; webKey?: string }> : null)
       .then((remote) => {
-        if (!remote?.jsKey) return;
+        if (!remote) return;
         setSettings((current) => ({
           jsKey: remote.jsKey ?? current.jsKey,
           securityCode: remote.securityCode ?? current.securityCode,
-          webKey: current.webKey,
+          webKey: remote.webKey ?? current.webKey,
         }));
       })
       .catch(() => undefined);
-  }, []);
+  }, [storageScope]);
 
   useEffect(() => {
     if (!settings.jsKey || !mapContainer.current) return;
@@ -1455,14 +1487,14 @@ export default function Home() {
   }
 
   function rememberShareLink(link: ShareLink) {
-    const next = [link, ...loadLocalShareLinks().filter((item) => item.token !== link.token && item.url !== link.url)];
-    saveLocalShareLinks(next);
+    const next = [link, ...loadLocalShareLinks(storageScope).filter((item) => item.token !== link.token && item.url !== link.url)];
+    saveLocalShareLinks(next, storageScope);
     setShareLinks(next);
   }
 
   async function refreshShareLinks() {
     setIsLoadingShareLinks(true);
-    const localLinks = loadLocalShareLinks();
+    const localLinks = loadLocalShareLinks(storageScope);
     setShareLinks(localLinks);
     try {
       const response = await fetch("/api/shares", { headers: { Accept: "application/json" }, cache: "no-store" });
@@ -1471,7 +1503,7 @@ export default function Home() {
       const cloudLinks: ShareLink[] = (payload.links ?? []).map((link) => ({ ...link, url: shareUrlForToken(link.token), storage: "cloud" }));
       const browserLinks = localLinks.filter((link) => link.storage === "browser");
       const next = [...cloudLinks, ...browserLinks.filter((link) => !cloudLinks.some((cloudLink) => cloudLink.token === link.token))];
-      saveLocalShareLinks(next);
+      saveLocalShareLinks(next, storageScope);
       setShareLinks(next);
     } catch {
       // The local cache still makes link management useful during local development without KV.
@@ -1496,8 +1528,8 @@ export default function Home() {
 
   async function revokeShareLink(link: ShareLink) {
     if (link.storage === "browser" || !link.token) {
-      const next = loadLocalShareLinks().filter((item) => item.url !== link.url);
-      saveLocalShareLinks(next);
+      const next = loadLocalShareLinks(storageScope).filter((item) => item.url !== link.url);
+      saveLocalShareLinks(next, storageScope);
       setShareLinks(next);
       flash("已从当前设备移除链接记录");
       return;
@@ -1505,8 +1537,8 @@ export default function Home() {
     try {
       const response = await fetch(`/api/shares?token=${encodeURIComponent(link.token)}`, { method: "DELETE", cache: "no-store" });
       if (!response.ok) throw new Error("revoke-failed");
-      const next = loadLocalShareLinks().filter((item) => item.token !== link.token);
-      saveLocalShareLinks(next);
+      const next = loadLocalShareLinks(storageScope).filter((item) => item.token !== link.token);
+      saveLocalShareLinks(next, storageScope);
       setShareLinks(next);
       flash("分享链接已失效");
     } catch {
@@ -1821,7 +1853,7 @@ export default function Home() {
     pendingLocalRoadbooksRef.current = null;
     localDraftDirtyRef.current = true;
     setRoadbooksState(next);
-    saveRoadbooks(next, true);
+    saveRoadbooks(next, true, storageScope);
     setStorageStatus("saving");
     try {
       const saved = await saveRemoteRoadbooks(next);
@@ -1831,7 +1863,7 @@ export default function Home() {
         return;
       }
       if (localDraftRevisionRef.current === saveRevision) {
-        saveRoadbooks(next, false);
+        saveRoadbooks(next, false, storageScope);
         localDraftDirtyRef.current = false;
         setStorageStatus("remote");
       } else {
@@ -1863,7 +1895,7 @@ export default function Home() {
     const target = roadbooks.find((roadbook) => roadbook.id === id);
     if (!target) return;
     setActiveRoadbookId(id);
-    rememberActiveRoadbook(id);
+    rememberActiveRoadbook(id, storageScope);
     setSelectedDayId(target.days[0]?.id ?? "");
     setShowLibrary(false);
     flash(`已切换到「${target.title}」`);
@@ -1873,7 +1905,7 @@ export default function Home() {
     const created = makeNewRoadbook(title, description);
     const next = [created, ...roadbooks];
     setActiveRoadbookId(created.id);
-    rememberActiveRoadbook(created.id);
+    rememberActiveRoadbook(created.id, storageScope);
     setSelectedDayId(created.days[0].id);
     setShowLibrary(false);
     void commitRoadbooks(next, "新路书已创建并保存到云端");
@@ -1891,7 +1923,7 @@ export default function Home() {
     if (id === activeRoadbookId) {
       const replacement = next[0];
       setActiveRoadbookId(replacement.id);
-      rememberActiveRoadbook(replacement.id);
+      rememberActiveRoadbook(replacement.id, storageScope);
       setSelectedDayId(replacement.days[0]?.id ?? "");
     }
     void commitRoadbooks(next, `「${target.title}」已删除并同步到云端`);
@@ -1903,10 +1935,10 @@ export default function Home() {
     // 副本的坐标与原路书一致，提前把已有轨迹写回本地缓存；后续路线计算会
     // 命中相同的坐标 key，不会为复制操作额外消耗高德 API。
     cacheRoadbookPaths(copied, routeCacheRef.current);
-    saveRouteCache(routeCacheRef.current);
+    saveRouteCache(routeCacheRef.current, storageScope);
     const next = [copied, ...roadbooks];
     setActiveRoadbookId(copied.id);
-    rememberActiveRoadbook(copied.id);
+    rememberActiveRoadbook(copied.id, storageScope);
     setSelectedDayId(copied.days[0]?.id ?? "");
     setShowCopyRoadbook(false);
     void commitRoadbooks(next, "路书副本已创建并保存到云端");
@@ -1954,7 +1986,7 @@ export default function Home() {
       }
     });
     if (entries.length) {
-      saveRouteCache(routeCacheRef.current);
+      saveRouteCache(routeCacheRef.current, storageScope);
       setRouteCacheLegs({ ...routeCacheRef.current.legs });
       setRouteCacheVersion((version) => version + 1);
     }
@@ -2081,10 +2113,32 @@ export default function Home() {
   function saveSettings(next: typeof settings) {
     if (readOnly) return;
     setSettings(next);
-    window.localStorage.setItem("roadbook-amap-settings", JSON.stringify(next));
+    window.localStorage.setItem(scopedStorageKey("roadbook-amap-settings", storageScope), JSON.stringify(next));
     setShowSettings(false);
     if (next.jsKey) setMapError("");
-    flash("高德地图配置已保存");
+    if (!authUser) {
+      flash("高德地图配置已保存");
+      return;
+    }
+    void fetch("/api/amap-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(next),
+    }).then(async (response) => {
+      const payload = await response.json().catch(() => ({})) as { jsKey?: string; securityCode?: string; webKey?: string };
+      if (!response.ok) {
+        flash("高德配置已保存在本机，但云端保存失败");
+        return;
+      }
+      setSettings((current) => ({ ...current, jsKey: payload.jsKey ?? current.jsKey, securityCode: payload.securityCode ?? current.securityCode, webKey: payload.webKey ?? current.webKey }));
+      window.localStorage.setItem(scopedStorageKey("roadbook-amap-settings", storageScope), JSON.stringify({ ...next, ...payload }));
+      flash("高德配置已保存到云端");
+    }).catch(() => flash("高德配置已保存在本机，但云端保存失败"));
+  }
+
+  function logoutAccount() {
+    if (!authUser) return;
+    void fetch("/api/auth/logout", { method: "POST", cache: "no-store" }).finally(() => { window.location.href = "/"; });
   }
 
   const storageStatusLabel = storageStatus === "remote"
@@ -2113,7 +2167,7 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          {readOnly ? <><div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><div className="top-system-status"><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></div><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" aria-label="用户菜单">Y</button></>}
+          {readOnly ? <><div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button><div className="top-system-status"><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></div><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" onClick={logoutAccount} aria-label={authUser ? `退出 ${authUser.username}` : "用户菜单"} title={authUser ? `当前账号：${authUser.username}，点击退出` : undefined}>{authUser?.username.slice(0, 1).toUpperCase() ?? "Y"}</button></>}
         </div>
       </header>
 
@@ -2306,5 +2360,5 @@ function ShareManagerModal({ links, isLoading, onClose, onRefresh, onCopy, onRev
 
 function SettingsModal({ settings, onClose, onSave }: { settings: { jsKey: string; securityCode: string; webKey: string }; onClose: () => void; onSave: (settings: { jsKey: string; securityCode: string; webKey: string }) => void }) {
   const [draft, setDraft] = useState(settings);
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card settings-modal"><div className="modal-head"><div><span className="eyebrow">AMAP CONNECTION</span><h2>连接你的高德服务</h2></div><button type="button" className="modal-close" onClick={onClose}>×</button></div><p className="settings-lead">Key 只会保存在当前浏览器。公开部署时，建议把 Web 服务 Key 改放到 Cloudflare Worker 的环境变量中。</p><label>Web 端（JS API）Key<input value={draft.jsKey} onChange={(event) => setDraft({ ...draft, jsKey: event.target.value })} placeholder="请输入 JS API Key" /></label><label>安全密钥 securityJsCode<input type="password" value={draft.securityCode} onChange={(event) => setDraft({ ...draft, securityCode: event.target.value })} placeholder="请输入安全密钥" /></label><label>Web 服务 Key <span className="optional">路线与搜索服务（可选）</span><input value={draft.webKey} onChange={(event) => setDraft({ ...draft, webKey: event.target.value })} placeholder="请输入 Web 服务 Key" /></label><div className="settings-warning"><span>!</span><span>不要把 Key 提交到公开 Git 仓库。JS API 安全密钥在生产环境应通过后端代理转发。</span></div><div className="modal-actions"><button className="ghost-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={() => onSave(draft)}>保存并连接 <span>→</span></button></div></div></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card settings-modal"><div className="modal-head"><div><span className="eyebrow">AMAP CONNECTION</span><h2>连接你的高德服务</h2></div><button type="button" className="modal-close" onClick={onClose}>×</button></div><p className="settings-lead">登录账号后，这 3 项凭据会保存到你的 Cloudflare KV 账号记录中，并只用于你的路书。Web 服务 Key 会由服务端调用，留空可保留已有配置。</p><label>Web 端（JS API）Key<input value={draft.jsKey} onChange={(event) => setDraft({ ...draft, jsKey: event.target.value })} placeholder="请输入 JS API Key" /></label><label>安全密钥 securityJsCode<input type="password" value={draft.securityCode} onChange={(event) => setDraft({ ...draft, securityCode: event.target.value })} placeholder="请输入安全密钥" /></label><label>Web 服务 Key <span className="optional">路线、地点搜索与服务区</span><input value={draft.webKey} onChange={(event) => setDraft({ ...draft, webKey: event.target.value })} placeholder="请输入 Web 服务 Key；留空保持原值" /></label><div className="settings-warning"><span>!</span><span>不要把 Key 提交到公开 Git 仓库。高德控制台建议为 JS API Key 设置当前站点域名白名单。</span></div><div className="modal-actions"><button className="ghost-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={() => onSave(draft)}>保存并连接 <span>→</span></button></div></div></div>;
 }

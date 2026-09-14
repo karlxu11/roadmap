@@ -34,8 +34,23 @@ npm run deploy
 | `AMAP_SECURITY_CODE` | 加密机密 | 高德 JS API 安全密钥 |
 | `AMAP_WEB_SERVICE_KEY` | 加密机密 | 高德“Web服务”Key |
 | `SITE_PASSWORD` | 加密机密 | 打开编辑网站时使用的访问密码；只读分享链接不需要密码 |
+| `allowregister` | 变量 | 设置为 `1` 后显示用户注册入口；关闭注册可删除该变量或改为其他值 |
 
 保存变量后重新部署。网站会通过 `/api/amap-config` 自动读取配置；也可以继续在网页设置里使用当前浏览器本地配置。
+
+## 用户注册与账号隔离
+
+配置 `ROADBOOK_KV` 后，将 Cloudflare Worker 的变量 `allowregister` 设置为 `1`，刷新网站即可看到注册入口。注册页要求填写用户名、密码，以及下面 3 项高德凭据：
+
+1. **Web 端（JS API）Key**
+2. **安全密钥 `securityJsCode`**
+3. **Web 服务 Key**
+
+获取方式：登录[高德开放平台控制台](https://console.amap.com/dev)，进入「应用管理」创建应用；添加一个「Web 端（JS API）」Key，复制 Key 和安全密钥；再添加一个「Web 服务」Key。注册页也提供了对应的官方说明链接。
+
+账号、密码哈希、高德凭据、路书和分享链接都会按用户写入 KV。浏览器本地缓存也按账号分开，切换账号不会读取其他账号的路书。
+
+首次启用账号模式时，Worker 会自动创建 `admin` 用户，初始密码为用户指定的 `nsnkarlxu`，并将现有的 `AMAP_JS_KEY`、`AMAP_SECURITY_CODE`、`AMAP_WEB_SERVICE_KEY` 绑定给它。已有 admin 的非空个人配置不会在每次请求时被环境变量覆盖；可以登录后在「配置地图」中修改。建议首次登录后关闭 `allowregister`，只允许已有账号登录。
 
 ## 云端保存（Workers KV）
 
@@ -61,7 +76,7 @@ ROADBOOK_KV_NAMESPACE_ID="你的 KV Namespace ID"
 
 部署脚本会自动读取 `.env.local`，之后直接执行 `npm run deploy` 即可；命令行临时传入的环境变量优先级更高。
 
-部署后，网站会优先从 KV 读取路书；第一次连接时会把现有浏览器里的路书迁移到 KV。之后点击“保存路书”会写入云端，浏览器本地只作为临时缓存。
+部署后，网站会优先从 KV 读取路书；账号模式下每个账号使用独立的 KV 记录，浏览器本地只作为该账号的临时缓存。未启用账号模式时，继续使用原有的单密码/本地兼容模式。
 
 ## 使用说明
 
