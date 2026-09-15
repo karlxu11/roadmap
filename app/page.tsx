@@ -988,6 +988,8 @@ export default function Home() {
   const [editingNoteStopId, setEditingNoteStopId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [showToast, setShowToast] = useState("");
+  const [showBaselineMigration, setShowBaselineMigration] = useState(false);
+  const pendingCloudRoadbooksRef = useRef<Roadbook[] | null>(null);
   const [isPreparingShare, setIsPreparingShare] = useState(false);
   const [storageStatus, setStorageStatus] = useState<"loading" | "remote" | "saving" | "local" | "unavailable">("loading");
   const [amapLoaded, setAmapLoaded] = useState(false);
@@ -1344,7 +1346,9 @@ export default function Home() {
         const hydrated = resolveHydratedRoadbooks(localDraftDirtyRef.current, latestLocalRoadbooks, remoteRoadbooks, baseline);
         const nextRoadbooks = hydrated.roadbooks;
         const keepLocalDraft = hydrated.keepLocalDraft;
-        saveSyncedRoadbooks(remoteRoadbooks, storageScope);
+        pendingCloudRoadbooksRef.current = hydrated.needsBaselineMigration ? remoteRoadbooks : null;
+        setShowBaselineMigration(hydrated.needsBaselineMigration);
+        if (!hydrated.needsBaselineMigration) saveSyncedRoadbooks(remoteRoadbooks, storageScope);
         const preferredId = preferredRoadbookId(nextRoadbooks, storageScope);
         const preferredRoadbook = nextRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? nextRoadbooks[0];
         setRoadbooksState(nextRoadbooks);
@@ -1702,6 +1706,31 @@ export default function Home() {
   function flash(message: string) {
     setShowToast(message);
     window.setTimeout(() => setShowToast(""), 2200);
+  }
+
+  function keepLocalBaselineDraft() {
+    pendingCloudRoadbooksRef.current = null;
+    setShowBaselineMigration(false);
+  }
+
+  function useCloudAfterBaselineMigration() {
+    const remoteRoadbooks = pendingCloudRoadbooksRef.current;
+    if (!remoteRoadbooks?.length) {
+      setShowBaselineMigration(false);
+      return;
+    }
+    pendingCloudRoadbooksRef.current = null;
+    localDraftDirtyRef.current = false;
+    const preferredId = preferredRoadbookId(remoteRoadbooks, storageScope);
+    const preferredRoadbook = remoteRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? remoteRoadbooks[0];
+    setRoadbooksState(remoteRoadbooks);
+    saveRoadbooks(remoteRoadbooks, false, storageScope);
+    saveSyncedRoadbooks(remoteRoadbooks, storageScope);
+    setActiveRoadbookId(preferredRoadbook.id);
+    setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
+    setStorageStatus("remote");
+    setShowBaselineMigration(false);
+    flash("已改用云端路书");
   }
 
   function shareUrlForToken(token: string) {
@@ -2608,7 +2637,7 @@ export default function Home() {
   }
 
   return (
-    <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""} ${isShareOverview ? "share-overview-view" : ""}`}>
+    <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""} ${isShareOverview ? "share-overview-view" : ""} ${showBaselineMigration ? "has-migration-banner" : ""}`}>
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">路</div>
@@ -2621,6 +2650,15 @@ export default function Home() {
           {readOnly ? <><div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button>{authUser?.username === "admin" && <button className="admin-users-button" type="button" onClick={openAdminUsers}>用户管理</button>}<div className="top-system-status"><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></div><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" onClick={logoutAccount} aria-label={authUser ? `退出 ${authUser.username}` : "用户菜单"} title={authUser ? `当前账号：${authUser.username}，点击退出` : undefined}>{authUser?.username.slice(0, 1).toUpperCase() ?? "Y"}</button></>}
         </div>
       </header>
+      {showBaselineMigration && !readOnly && (
+        <div className="baseline-migration-banner" role="status">
+          <p>本机有升级前未同步的草稿。为避免把你删过的地点插回来，这次先保留本机；云端新地点要等你确认后才合并。</p>
+          <div className="baseline-migration-actions">
+            <button type="button" onClick={keepLocalBaselineDraft}>保留本机</button>
+            <button type="button" className="baseline-migration-cloud" onClick={useCloudAfterBaselineMigration}>使用云端</button>
+          </div>
+        </div>
+      )}
 
       <div ref={workspaceRef} className={`workspace ${isRoadbookOverview ? "share-overview-workspace" : ""}`} style={{ "--editor-track": `${editorWidth}fr`, "--map-track": `${100 - editorWidth}fr` } as CSSProperties}>
         <aside className="sidebar">

@@ -28,6 +28,10 @@ export type MergeRoadbook = {
   days: MergeDay[];
 };
 
+export type MergeOptions = {
+  insertRemoteOnly?: boolean;
+};
+
 function byId<T extends { id: string }>(items: T[]) {
   return new Map(items.map((item) => [item.id, item]));
 }
@@ -51,6 +55,7 @@ function mergeOrdered<T extends { id: string }>(
   remoteItems: T[],
   mergeItem: (local: T, remote: T) => T,
   baselineItems?: T[],
+  options?: MergeOptions,
 ) {
   const localIds = new Set(localItems.map((item) => item.id));
   const knownIds = baselineItems ? new Set(baselineItems.map((item) => item.id)) : null;
@@ -58,6 +63,7 @@ function mergeOrdered<T extends { id: string }>(
   const extras: Array<{ item: T; anchor: string | null }> = [];
   remoteItems.forEach((item, index) => {
     if (localIds.has(item.id)) return;
+    if (options?.insertRemoteOnly === false) return;
     // 基线里有、本机没有：用户未保存的删除，不要当成云端新增插回。
     if (knownIds?.has(item.id)) return;
     let anchor: string | null = null;
@@ -90,17 +96,17 @@ function mergeOrdered<T extends { id: string }>(
   return result;
 }
 
-function mergeDay(local: MergeDay, remote: MergeDay, baseline?: MergeDay): MergeDay {
+function mergeDay(local: MergeDay, remote: MergeDay, baseline?: MergeDay, options?: MergeOptions): MergeDay {
   return {
     ...remote,
     date: local.date,
     title: local.title,
     subtitle: local.subtitle,
-    stops: mergeOrdered(local.stops, remote.stops, mergeStop, baseline?.stops),
+    stops: mergeOrdered(local.stops, remote.stops, mergeStop, baseline?.stops, options),
   };
 }
 
-function mergeRoadbook(local: MergeRoadbook, remote: MergeRoadbook, baseline?: MergeRoadbook): MergeRoadbook {
+function mergeRoadbook(local: MergeRoadbook, remote: MergeRoadbook, baseline?: MergeRoadbook, options?: MergeOptions): MergeRoadbook {
   const baselineDays = baseline ? byId(baseline.days) : undefined;
   return {
     ...remote,
@@ -108,17 +114,18 @@ function mergeRoadbook(local: MergeRoadbook, remote: MergeRoadbook, baseline?: M
     description: local.description,
     region: local.region,
     ...(local.startDate ? { startDate: local.startDate } : remote.startDate ? { startDate: remote.startDate } : {}),
-    days: mergeOrdered(local.days, remote.days, (localDay, remoteDay) => mergeDay(localDay, remoteDay, baselineDays?.get(localDay.id)), baseline?.days),
+    days: mergeOrdered(local.days, remote.days, (localDay, remoteDay) => mergeDay(localDay, remoteDay, baselineDays?.get(localDay.id), options), baseline?.days, options),
   };
 }
 
-export function mergeRoadbookLibraries<T extends MergeRoadbook>(local: T[], remote: T[], baseline?: T[]): T[] {
+export function mergeRoadbookLibraries<T extends MergeRoadbook>(local: T[], remote: T[], baseline?: T[], options?: MergeOptions): T[] {
   const baselineBooks = baseline ? byId(baseline) : undefined;
   return mergeOrdered(
     local,
     remote,
-    (localBook, remoteBook) => mergeRoadbook(localBook, remoteBook, baselineBooks?.get(localBook.id)) as T,
+    (localBook, remoteBook) => mergeRoadbook(localBook, remoteBook, baselineBooks?.get(localBook.id), options) as T,
     baseline,
+    options,
   );
 }
 
@@ -156,10 +163,18 @@ export function resolveHydratedRoadbooks<T extends MergeRoadbook>(
   remote: T[],
   baseline?: T[],
 ) {
-  if (!dirty) return { roadbooks: remote, keepLocalDraft: false };
+  if (!dirty) return { roadbooks: remote, keepLocalDraft: false, needsBaselineMigration: false };
+  if (!baseline?.length) {
+    return {
+      roadbooks: mergeRoadbookLibraries(latestLocal, remote, undefined, { insertRemoteOnly: false }),
+      keepLocalDraft: true,
+      needsBaselineMigration: true,
+    };
+  }
   return {
     roadbooks: mergeRoadbookLibraries(latestLocal, remote, baseline),
     keepLocalDraft: localLibraryHasUnsyncedEdits(latestLocal, remote, baseline),
+    needsBaselineMigration: false,
   };
 }
 

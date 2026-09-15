@@ -7,6 +7,12 @@ body { margin: 0; background: var(--paper); color: var(--ink); font-family: Aria
 button, input { font: inherit; }
 button { cursor: pointer; }
 .app-shell { min-height: 100vh; overflow: hidden; background: var(--paper); }
+.baseline-migration-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 34px; border-bottom: 1px solid #ead9c4; background: #fff6eb; color: #5c4a3a; font-size: 12px; line-height: 1.6; }
+.baseline-migration-banner p { margin: 0; }
+.baseline-migration-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.baseline-migration-actions button { height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: #fffdf8; color: #6f7c71; font-size: 11px; font-weight: 700; }
+.baseline-migration-actions .baseline-migration-cloud { border-color: #d8a487; background: #fff7ef; color: var(--orange); }
+.app-shell.has-migration-banner .workspace { min-height: calc(100vh - 130px); }
 .topbar { height: 78px; padding: 0 34px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: rgba(255, 253, 248, .82); }
 .brand-lockup, .top-actions, .top-system-status, .route-connection-status, .title-row, .editor-actions, .trip-meta, .day-list-header, .stop-main, .map-topbar, .map-bottom, .legend, .modal-head, .modal-actions, .search-box { display: flex; align-items: center; }
 .brand-lockup { gap: 12px; }

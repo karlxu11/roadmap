@@ -28,7 +28,7 @@ test("pulls cloud-only scenic stops into a stale local draft", () => {
     stop("s-hotel", "泸水市", { kind: "住宿", duration: "待安排" }),
   ])])];
 
-  const merged = mergeRoadbookLibraries(local, remote);
+  const merged = mergeRoadbookLibraries(local, remote, local);
   assert.deepEqual(merged[0].days[0].stops.map((item) => item.name), [
     "丙中洛观景台",
     "石月亮观景台",
@@ -36,7 +36,25 @@ test("pulls cloud-only scenic stops into a stale local draft", () => {
     "知子罗",
     "泸水市",
   ]);
-  assert.equal(localLibraryHasUnsyncedEdits(local, remote), false);
+  assert.equal(localLibraryHasUnsyncedEdits(local, remote, local), false);
+});
+
+test("first upgrade of a dirty draft without a synced baseline keeps local deletes", () => {
+  const local = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const remote = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-moon", "石月亮观景台"),
+    stop("s-church", "老姆登基督教堂"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+
+  const hydrated = resolveHydratedRoadbooks(true, local, remote);
+  assert.deepEqual(hydrated.roadbooks[0].days[0].stops.map((item) => item.id), ["s-start", "s-hotel"]);
+  assert.equal(hydrated.keepLocalDraft, true);
+  assert.equal(hydrated.needsBaselineMigration, true);
 });
 
 test("keeps a locally added stop that cloud does not have yet", () => {
@@ -51,7 +69,10 @@ test("keeps a locally added stop that cloud does not have yet", () => {
     stop("s-hotel", "泸水市", { kind: "住宿", duration: "待安排" }),
   ])])];
 
-  const merged = mergeRoadbookLibraries(local, remote);
+  const merged = mergeRoadbookLibraries(local, remote, [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台", { kind: "出发", duration: "09:00 出发" }),
+    stop("s-hotel", "泸水市", { kind: "住宿", duration: "待安排" }),
+  ])])]);
   assert.deepEqual(merged[0].days[0].stops.map((item) => item.name), [
     "丙中洛观景台",
     "老姆登基督教堂",
@@ -74,7 +95,11 @@ test("keeps a local stop reorder and inserts the cloud-only stop after its remot
     stop("s-c", "飞来石"),
   ])])];
 
-  const merged = mergeRoadbookLibraries(local, remote);
+  const merged = mergeRoadbookLibraries(local, remote, [book("rb-13", [day("day-8", [
+    stop("s-a", "石月亮观景台"),
+    stop("s-b", "知子罗"),
+    stop("s-c", "飞来石"),
+  ])])]);
   assert.deepEqual(merged[0].days[0].stops.map((item) => item.id), ["s-a", "s-c", "s-b", "s-x"]);
   assert.equal(localLibraryHasUnsyncedEdits(local, remote), true);
 });
@@ -92,7 +117,11 @@ test("keeps a local day reorder and still picks up a cloud-only day", () => {
     day("day-3", [stop("s-3", "飞来寺")], { title: "大理 → 飞来寺" }),
   ])];
 
-  const merged = mergeRoadbookLibraries(local, remote);
+  const merged = mergeRoadbookLibraries(local, remote, [book("rb-13", [
+    day("day-1", [stop("s-1", "益田村")], { title: "深圳 → 百色" }),
+    day("day-2", [stop("s-2", "大理古城")], { title: "百色 → 大理" }),
+    day("day-3", [stop("s-3", "飞来寺")], { title: "大理 → 飞来寺" }),
+  ])]);
   assert.deepEqual(merged[0].days.map((item) => item.id), ["day-1", "day-3", "day-2", "day-4"]);
   assert.equal(localLibraryHasUnsyncedEdits(local, remote), true);
 });
@@ -106,7 +135,7 @@ test("keeps local stay time and note on a shared stop", () => {
     stop("s-church", "老姆登基督教堂"),
   ])])];
 
-  const merged = mergeRoadbookLibraries(local, remote);
+  const merged = mergeRoadbookLibraries(local, remote, local);
   assert.equal(merged[0].days[0].stops[0].stayMinutes, 30);
   assert.equal(merged[0].days[0].stops[0].note, "停车拍照");
   assert.equal(merged[0].days[0].stops[1].name, "老姆登基督教堂");
@@ -206,6 +235,7 @@ test("hydrate uses the latest local draft, not the snapshot from before the clou
   const hydrated = resolveHydratedRoadbooks(true, latestLocal, remote, localAtFetchStart);
   assert.ok(hydrated.roadbooks[0].days[0].stops.some((item) => item.id === "s-mine"));
   assert.ok(hydrated.roadbooks[0].days[0].stops.some((item) => item.id === "s-church"));
+  assert.equal(hydrated.needsBaselineMigration, false);
 });
 
 test("keeps a locally created roadbook that is not on the cloud yet", () => {
