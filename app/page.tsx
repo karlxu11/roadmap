@@ -6,6 +6,7 @@ import { flushSync } from "react-dom";
 import Link from "next/link";
 import { daxinganlingDays, initialDays as importedDays, tibetDays } from "./roadbook-data";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
+import { normalizedStayMinutes } from "./stay-time";
 
 type StopKind = "出发" | "途经" | "住宿" | "景点";
 
@@ -880,12 +881,6 @@ const STAY_OPTIONS = [
   { minutes: 300, label: "5 小时" },
   { minutes: 360, label: "6 小时" },
 ] as const;
-
-function normalizedStayMinutes(value: unknown) {
-  const minutes = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
-  return Math.min(16 * 60, Math.round(minutes));
-}
 
 function stopStayMinutes(stop: Stop) {
   return stop.kind === "出发" ? 0 : normalizedStayMinutes(stop.stayMinutes);
