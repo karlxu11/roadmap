@@ -138,8 +138,11 @@ button { cursor: pointer; }
 .new-roadbook-form .primary-button { width: 100%; margin-top: 3px; }
 .library-lead { display: flex; align-items: baseline; gap: 9px; margin: 16px 0 -8px; color: #8f9a90; font-size: 11px; line-height: 1.6; }
 .library-lead strong { color: #506078; font-size: 12px; }
-.share-manager-modal { width: min(650px, 100%); }
+.share-manager-modal { width: min(720px, 100%); }
 .share-manager-head-actions { display: flex; align-items: center; gap: 8px; }
+.import-all-share-button { height: 32px; padding: 0 10px; border: 1px solid #c5d6bf; border-radius: 6px; background: #eef6ea; color: var(--green); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.import-all-share-button:hover:not(:disabled) { border-color: #a9bea3; background: #e3f0dc; color: var(--deep); }
+.import-all-share-button:disabled { opacity: 0.6; cursor: wait; }
 .refresh-share-button { width: 28px; height: 28px; border: 1px solid #dfe5da; border-radius: 50%; background: #f6f8f2; color: #829181; font-size: 17px; }
 .refresh-share-button:hover { border-color: #b7c9b2; color: var(--green); }
 .share-manager-lead { margin: 16px 0 21px; color: #8f9a90; font-size: 11px; line-height: 1.7; }
@@ -169,6 +172,9 @@ button { cursor: pointer; }
 .share-link-actions { display: flex; flex-shrink: 0; gap: 6px; }
 .share-link-actions button { padding: 6px 8px; border: 1px solid #dfe5da; border-radius: 5px; background: #f8faf5; color: #718071; font-size: 10px; }
 .share-link-actions button:hover { border-color: #aec1aa; background: #f0f6ed; color: var(--deep); }
+.share-link-actions button.import-share { border-color: #c5d6bf; background: #eef6ea; color: var(--green); font-weight: 700; }
+.share-link-actions button.import-share:hover:not(:disabled) { border-color: #a9bea3; background: #e3f0dc; color: var(--deep); }
+.share-link-actions button:disabled { opacity: 0.6; cursor: wait; }
 .share-link-actions button.danger { border-color: #ead5c8; background: #fff8f1; color: #b47758; }
 .share-link-actions button.danger:hover { border-color: #dcae93; background: #fff0e3; color: var(--orange); }
 .share-link-actions button.muted { color: #a5ada4; }
