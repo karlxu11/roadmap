@@ -5,6 +5,7 @@ import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState
 import { flushSync } from "react-dom";
 import Link from "next/link";
 import { daxinganlingDays, initialDays as importedDays, tibetDays } from "./roadbook-data";
+import { resolveHydratedRoadbooks, resolveSuccessfulSaveDuringBaselineMigration, resolveUseCloudAfterBaselineMigration } from "./merge-roadbooks";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
 import { normalizedStayMinutes } from "./stay-time";
 
@@ -118,6 +119,7 @@ const importedTibetDays: DayPlan[] = tibetDays as unknown as DayPlan[];
 
 const ROADBOOK_LIBRARY_KEY = "roadbook-library-v1";
 const ROADBOOK_DRAFT_META_KEY = "roadbook-library-v1-draft";
+const ROADBOOK_SYNCED_KEY = "roadbook-library-v1-synced";
 const ACTIVE_ROADBOOK_KEY = "roadbook-last-active-v1";
 const LEGACY_ROADBOOK_KEY = "roadbook-days-v2";
 const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
@@ -676,10 +678,30 @@ function rememberActiveRoadbook(id: string, storageScope = "legacy") {
   }
 }
 
+function loadSyncedRoadbooks(storageScope = "legacy"): Roadbook[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const saved = window.localStorage.getItem(scopedStorageKey(ROADBOOK_SYNCED_KEY, storageScope));
+    return saved ? normalizeStoredRoadbooks(JSON.parse(saved)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSyncedRoadbooks(roadbooks: Roadbook[], storageScope = "legacy") {
+  try {
+    window.localStorage.setItem(scopedStorageKey(ROADBOOK_SYNCED_KEY, storageScope), JSON.stringify(roadbooks));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function saveRoadbooks(roadbooks: Roadbook[], dirty = true, storageScope = "legacy") {
   try {
     window.localStorage.setItem(scopedStorageKey(ROADBOOK_LIBRARY_KEY, storageScope), JSON.stringify(roadbooks));
     window.localStorage.setItem(scopedStorageKey(ROADBOOK_DRAFT_META_KEY, storageScope), JSON.stringify({ dirty, updatedAt: Date.now() } satisfies RoadbookDraftMeta));
+    if (!dirty) saveSyncedRoadbooks(roadbooks, storageScope);
     return true;
   } catch {
     return false;
@@ -966,6 +988,8 @@ export default function Home() {
   const [editingNoteStopId, setEditingNoteStopId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [showToast, setShowToast] = useState("");
+  const [showBaselineMigration, setShowBaselineMigration] = useState(false);
+  const pendingCloudRoadbooksRef = useRef<Roadbook[] | null>(null);
   const [isPreparingShare, setIsPreparingShare] = useState(false);
   const [storageStatus, setStorageStatus] = useState<"loading" | "remote" | "saving" | "local" | "unavailable">("loading");
   const [amapLoaded, setAmapLoaded] = useState(false);
@@ -1170,11 +1194,15 @@ export default function Home() {
   selectedDayCalendarDate.setDate(selectedDayCalendarDate.getDate() + selectedDayIndex);
   const selectedDayDateValue = formatCalendarDate(selectedDayCalendarDate);
 
-  function flushScheduledRoadbookSave() {
+  function cancelPendingLocalRoadbookSave() {
     if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
     localRoadbookSaveTimerRef.current = null;
-    const pending = pendingLocalRoadbooksRef.current;
     pendingLocalRoadbooksRef.current = null;
+  }
+
+  function flushScheduledRoadbookSave() {
+    const pending = pendingLocalRoadbooksRef.current;
+    cancelPendingLocalRoadbookSave();
     if (pending && !saveRoadbooks(pending, true, storageScopeRef.current)) setStorageStatus("unavailable");
   }
 
@@ -1312,21 +1340,28 @@ export default function Home() {
     fetchRemoteRoadbooks(storageScope).then(async (remotePayload) => {
       if (cancelled) return;
       if (remotePayload) {
-        // 未点击“保存路书”的本地草稿优先于云端快照，避免刷新时丢失编辑。
-        if (localDraftDirtyRef.current) {
-          setStorageStatus("local");
-          return;
-        }
         const remoteRoadbooks = remotePayload.roadbooks;
-        const preferredId = preferredRoadbookId(remoteRoadbooks, storageScope);
-        const preferredRoadbook = remoteRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? remoteRoadbooks[0];
-        setRoadbooksState(remoteRoadbooks);
-        saveRoadbooks(remoteRoadbooks, false, storageScope);
-        localDraftDirtyRef.current = false;
+        // 本机未保存草稿不再挡住云端。用“上次已观察的云端快照”区分新增和删除；
+        // 请求返回时先落盘再读最新本机草稿，避免拉取期间的编辑被旧闭包盖掉。
+        flushScheduledRoadbookSave();
+        const latestLocalRoadbooks = loadRoadbooks(storageScope);
+        const previousSynced = loadSyncedRoadbooks(storageScope);
+        const baseline = previousSynced.length ? previousSynced : undefined;
+        const hydrated = resolveHydratedRoadbooks(localDraftDirtyRef.current, latestLocalRoadbooks, remoteRoadbooks, baseline);
+        const nextRoadbooks = hydrated.roadbooks;
+        const keepLocalDraft = hydrated.keepLocalDraft;
+        pendingCloudRoadbooksRef.current = hydrated.needsBaselineMigration ? remoteRoadbooks : null;
+        setShowBaselineMigration(hydrated.needsBaselineMigration);
+        if (!hydrated.needsBaselineMigration) saveSyncedRoadbooks(remoteRoadbooks, storageScope);
+        const preferredId = preferredRoadbookId(nextRoadbooks, storageScope);
+        const preferredRoadbook = nextRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? nextRoadbooks[0];
+        setRoadbooksState(nextRoadbooks);
+        saveRoadbooks(nextRoadbooks, keepLocalDraft, storageScope);
+        localDraftDirtyRef.current = keepLocalDraft;
         setActiveRoadbookId(preferredRoadbook.id);
         setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
-        setStorageStatus("remote");
-        if (remotePayload.added) void saveRemoteRoadbooks(remoteRoadbooks);
+        setStorageStatus(keepLocalDraft ? "local" : "remote");
+        if (remotePayload.added) void saveRemoteRoadbooks(nextRoadbooks);
         return;
       }
       if (localDraftDirtyRef.current) {
@@ -1675,6 +1710,38 @@ export default function Home() {
   function flash(message: string) {
     setShowToast(message);
     window.setTimeout(() => setShowToast(""), 2200);
+  }
+
+  function keepLocalBaselineDraft() {
+    pendingCloudRoadbooksRef.current = null;
+    setShowBaselineMigration(false);
+  }
+
+  function useCloudAfterBaselineMigration() {
+    const resolved = resolveUseCloudAfterBaselineMigration(
+      pendingCloudRoadbooksRef.current,
+      pendingLocalRoadbooksRef.current,
+    );
+    if (!resolved.accepted) {
+      pendingCloudRoadbooksRef.current = null;
+      setShowBaselineMigration(false);
+      return;
+    }
+    cancelPendingLocalRoadbookSave();
+    pendingCloudRoadbooksRef.current = null;
+    localDraftDirtyRef.current = false;
+    localDraftRevisionRef.current += 1;
+    const remoteRoadbooks = resolved.roadbooks;
+    const preferredId = preferredRoadbookId(remoteRoadbooks, storageScope);
+    const preferredRoadbook = remoteRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? remoteRoadbooks[0];
+    setRoadbooksState(remoteRoadbooks);
+    saveRoadbooks(remoteRoadbooks, false, storageScope);
+    saveSyncedRoadbooks(remoteRoadbooks, storageScope);
+    setActiveRoadbookId(preferredRoadbook.id);
+    setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
+    setStorageStatus("remote");
+    setShowBaselineMigration(false);
+    flash("已改用云端路书");
   }
 
   function shareUrlForToken(token: string) {
@@ -2204,9 +2271,7 @@ export default function Home() {
 
   async function commitRoadbooks(next: Roadbook[], successMessage: string, afterSave?: (saved: boolean) => Promise<string | null>) {
     const saveRevision = localDraftRevisionRef.current;
-    if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
-    localRoadbookSaveTimerRef.current = null;
-    pendingLocalRoadbooksRef.current = null;
+    cancelPendingLocalRoadbookSave();
     localDraftDirtyRef.current = true;
     setRoadbooksState(next);
     saveRoadbooks(next, true, storageScope);
@@ -2217,6 +2282,9 @@ export default function Home() {
         saveRoadbooks(next, false, storageScope);
         localDraftDirtyRef.current = false;
         setStorageStatus("remote");
+        const cleared = resolveSuccessfulSaveDuringBaselineMigration();
+        pendingCloudRoadbooksRef.current = cleared.pendingCloud;
+        setShowBaselineMigration(cleared.needsBaselineMigration);
       } else if (saved) {
         setStorageStatus("local");
       } else {
@@ -2581,7 +2649,7 @@ export default function Home() {
   }
 
   return (
-    <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""} ${isShareOverview ? "share-overview-view" : ""}`}>
+    <main className={`app-shell ${isResizing ? "is-resizing" : ""} ${readOnly ? "read-only-view" : ""} ${isShareOverview ? "share-overview-view" : ""} ${showBaselineMigration ? "has-migration-banner" : ""}`}>
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">路</div>
@@ -2594,6 +2662,15 @@ export default function Home() {
           {readOnly ? <><div className="share-mode-label"><span>分享路书</span><small>路径 · 费用 · 时间已记录</small></div><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></> : <><button className="library-button" type="button" onClick={() => setShowLibrary(true)}>☷ 我的路书 <span>{roadbooks.length}</span></button><button className="share-manager-button" type="button" onClick={openShareManager}>↗ 分享管理</button>{authUser?.username === "admin" && <button className="admin-users-button" type="button" onClick={openAdminUsers}>用户管理</button>}<div className="top-system-status"><button className="sync-status" type="button" onClick={saveTrip}><span className="status-dot" />{storageStatusLabel}</button><span className="route-connection-status"><span className={`route-status-dot ${mapReady ? "connected" : ""}`} />{routeConnectionLabel}</span></div><button className="map-settings-button" type="button" onClick={() => setShowSettings(true)}>配置地图</button><button className="new-roadbook-button" type="button" onClick={() => setShowLibrary(true)}>＋ 新路书</button><button className="avatar" type="button" onClick={logoutAccount} aria-label={authUser ? `退出 ${authUser.username}` : "用户菜单"} title={authUser ? `当前账号：${authUser.username}，点击退出` : undefined}>{authUser?.username.slice(0, 1).toUpperCase() ?? "Y"}</button></>}
         </div>
       </header>
+      {showBaselineMigration && !readOnly && (
+        <div className="baseline-migration-banner" role="status">
+          <p>本机有升级前未同步的草稿。为避免把你删过的地点插回来，这次先保留本机；云端新地点要等你确认后才合并。</p>
+          <div className="baseline-migration-actions">
+            <button type="button" onClick={keepLocalBaselineDraft}>保留本机</button>
+            <button type="button" className="baseline-migration-cloud" onClick={useCloudAfterBaselineMigration}>使用云端</button>
+          </div>
+        </div>
+      )}
 
       <div ref={workspaceRef} className={`workspace ${isRoadbookOverview ? "share-overview-workspace" : ""}`} style={{ "--editor-track": `${editorWidth}fr`, "--map-track": `${100 - editorWidth}fr` } as CSSProperties}>
         <aside className="sidebar">
