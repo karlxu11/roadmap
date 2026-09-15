@@ -5,7 +5,7 @@ import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState
 import { flushSync } from "react-dom";
 import Link from "next/link";
 import { daxinganlingDays, initialDays as importedDays, tibetDays } from "./roadbook-data";
-import { resolveHydratedRoadbooks } from "./merge-roadbooks";
+import { resolveHydratedRoadbooks, resolveSuccessfulSaveDuringBaselineMigration, resolveUseCloudAfterBaselineMigration } from "./merge-roadbooks";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
 import { normalizedStayMinutes } from "./stay-time";
 
@@ -1194,11 +1194,15 @@ export default function Home() {
   selectedDayCalendarDate.setDate(selectedDayCalendarDate.getDate() + selectedDayIndex);
   const selectedDayDateValue = formatCalendarDate(selectedDayCalendarDate);
 
-  function flushScheduledRoadbookSave() {
+  function cancelPendingLocalRoadbookSave() {
     if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
     localRoadbookSaveTimerRef.current = null;
-    const pending = pendingLocalRoadbooksRef.current;
     pendingLocalRoadbooksRef.current = null;
+  }
+
+  function flushScheduledRoadbookSave() {
+    const pending = pendingLocalRoadbooksRef.current;
+    cancelPendingLocalRoadbookSave();
     if (pending && !saveRoadbooks(pending, true, storageScopeRef.current)) setStorageStatus("unavailable");
   }
 
@@ -1714,13 +1718,20 @@ export default function Home() {
   }
 
   function useCloudAfterBaselineMigration() {
-    const remoteRoadbooks = pendingCloudRoadbooksRef.current;
-    if (!remoteRoadbooks?.length) {
+    const resolved = resolveUseCloudAfterBaselineMigration(
+      pendingCloudRoadbooksRef.current,
+      pendingLocalRoadbooksRef.current,
+    );
+    if (!resolved.accepted) {
+      pendingCloudRoadbooksRef.current = null;
       setShowBaselineMigration(false);
       return;
     }
+    cancelPendingLocalRoadbookSave();
     pendingCloudRoadbooksRef.current = null;
     localDraftDirtyRef.current = false;
+    localDraftRevisionRef.current += 1;
+    const remoteRoadbooks = resolved.roadbooks;
     const preferredId = preferredRoadbookId(remoteRoadbooks, storageScope);
     const preferredRoadbook = remoteRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? remoteRoadbooks[0];
     setRoadbooksState(remoteRoadbooks);
@@ -2260,9 +2271,7 @@ export default function Home() {
 
   async function commitRoadbooks(next: Roadbook[], successMessage: string, afterSave?: (saved: boolean) => Promise<string | null>) {
     const saveRevision = localDraftRevisionRef.current;
-    if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
-    localRoadbookSaveTimerRef.current = null;
-    pendingLocalRoadbooksRef.current = null;
+    cancelPendingLocalRoadbookSave();
     localDraftDirtyRef.current = true;
     setRoadbooksState(next);
     saveRoadbooks(next, true, storageScope);
@@ -2273,6 +2282,9 @@ export default function Home() {
         saveRoadbooks(next, false, storageScope);
         localDraftDirtyRef.current = false;
         setStorageStatus("remote");
+        const cleared = resolveSuccessfulSaveDuringBaselineMigration();
+        pendingCloudRoadbooksRef.current = cleared.pendingCloud;
+        setShowBaselineMigration(cleared.needsBaselineMigration);
       } else if (saved) {
         setStorageStatus("local");
       } else {

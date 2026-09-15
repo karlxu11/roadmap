@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { localLibraryHasUnsyncedEdits, mergeRoadbookLibraries, resolveHydratedRoadbooks } from "../app/merge-roadbooks.ts";
+import { localLibraryHasUnsyncedEdits, mergeRoadbookLibraries, resolveHydratedRoadbooks, resolveSuccessfulSaveDuringBaselineMigration, resolveUseCloudAfterBaselineMigration } from "../app/merge-roadbooks.ts";
 
 function stop(id, name, extra = {}) {
   return { id, name, area: "云南", kind: "景点", lat: 26, lng: 99, duration: "顺路打卡", ...extra };
@@ -236,6 +236,66 @@ test("hydrate uses the latest local draft, not the snapshot from before the clou
   assert.ok(hydrated.roadbooks[0].days[0].stops.some((item) => item.id === "s-mine"));
   assert.ok(hydrated.roadbooks[0].days[0].stops.some((item) => item.id === "s-church"));
   assert.equal(hydrated.needsBaselineMigration, false);
+});
+
+test("using cloud discards a pending local edit so refresh does not revive the abandoned draft", () => {
+  const localDraft = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const remote = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-moon", "石月亮观景台"),
+    stop("s-church", "老姆登基督教堂"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+
+  const hydrated = resolveHydratedRoadbooks(true, localDraft, remote);
+  assert.equal(hydrated.needsBaselineMigration, true);
+
+  const editedLocal = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-mine", "雾里村"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const accepted = resolveUseCloudAfterBaselineMigration(remote, editedLocal);
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.pendingLocalWrite, null);
+  assert.equal(accepted.keepLocalDraft, false);
+  assert.deepEqual(accepted.roadbooks[0].days[0].stops.map((item) => item.id), [
+    "s-start",
+    "s-moon",
+    "s-church",
+    "s-hotel",
+  ]);
+
+  const afterRefresh = resolveHydratedRoadbooks(accepted.keepLocalDraft, accepted.roadbooks, remote, remote);
+  assert.equal(afterRefresh.needsBaselineMigration, false);
+  assert.equal(afterRefresh.keepLocalDraft, false);
+  assert.ok(!afterRefresh.roadbooks[0].days[0].stops.some((item) => item.id === "s-mine"));
+});
+
+test("successful save while the upgrade prompt is visible drops the stale pending cloud snapshot", () => {
+  const localDraft = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const staleCloud = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-moon", "石月亮观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+
+  const hydrated = resolveHydratedRoadbooks(true, localDraft, staleCloud);
+  assert.equal(hydrated.needsBaselineMigration, true);
+
+  const cleared = resolveSuccessfulSaveDuringBaselineMigration();
+  assert.equal(cleared.needsBaselineMigration, false);
+  assert.equal(cleared.pendingCloud, null);
+
+  const afterRefresh = resolveHydratedRoadbooks(false, localDraft, localDraft, localDraft);
+  assert.equal(afterRefresh.needsBaselineMigration, false);
+  assert.deepEqual(afterRefresh.roadbooks[0].days[0].stops.map((item) => item.id), ["s-start", "s-hotel"]);
 });
 
 test("keeps a locally created roadbook that is not on the cloud yet", () => {

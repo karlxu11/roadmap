@@ -178,6 +178,34 @@ export function resolveHydratedRoadbooks<T extends MergeRoadbook>(
   };
 }
 
+/** 使用云端：丢掉尚未落盘的本机草稿，采用提示出现时记下的云端快照。 */
+export function resolveUseCloudAfterBaselineMigration<T extends MergeRoadbook>(
+  pendingCloud: T[] | null,
+  pendingLocalWrite: T[] | null,
+) {
+  if (!pendingCloud?.length) {
+    return {
+      accepted: false as const,
+      roadbooks: [] as T[],
+      keepLocalDraft: true,
+      needsBaselineMigration: false,
+      pendingLocalWrite,
+    };
+  }
+  return {
+    accepted: true as const,
+    roadbooks: pendingCloud,
+    keepLocalDraft: false,
+    needsBaselineMigration: false,
+    pendingLocalWrite: null,
+  };
+}
+
+/** 升级提示仍在时保存成功：本机已与刚写入的云端对齐，旧快照不能再覆盖。 */
+export function resolveSuccessfulSaveDuringBaselineMigration() {
+  return { needsBaselineMigration: false, pendingCloud: null };
+}
+
 export function localLibraryHasUnsyncedEdits(local: MergeRoadbook[], remote: MergeRoadbook[], baseline?: MergeRoadbook[]) {
   if (hasLocalDeletes(local, remote, baseline)) return true;
   const remoteBooks = byId(remote);
