@@ -1713,13 +1713,17 @@ export default function Home() {
       return { ok: true, url: shareUrlForToken(encodeShareSnapshot(nextSnapshot)) };
     }
     if (!link.token) return { ok: false };
-    const response = await fetch(`/api/shares?token=${encodeURIComponent(link.token)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(nextSnapshot),
-      cache: "no-store",
-    });
-    return { ok: response.ok };
+    try {
+      const response = await fetch(`/api/shares?token=${encodeURIComponent(link.token)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(nextSnapshot),
+        cache: "no-store",
+      });
+      return { ok: response.ok };
+    } catch {
+      return { ok: false };
+    }
   }
 
   function openImportedRoadbook(roadbook: Roadbook) {
@@ -1756,18 +1760,27 @@ export default function Home() {
       const next = [...prepared.map((item) => item.roadbook), ...roadbooks];
       openImportedRoadbook(prepared[0].roadbook);
       // 先把路书写入库，避免绑定成功后保存失败留下孤立分享。
-      await commitRoadbooks(next, successMessage(prepared.length));
+      const saved = await commitRoadbooks(next, successMessage(prepared.length));
 
       const nextShareLinks = shareLinks.map((item) => ({ ...item }));
       let bindFailed = 0;
       for (const item of prepared) {
-        const relinked = await relinkShareToRoadbook(item.link, item.snapshot, item.roadbook);
-        if (!relinked.ok) {
+        try {
+          // 云端保存失败时不要绑定云端分享，避免指向尚未落库的路书。
+          if (item.link.storage !== "browser" && !saved) {
+            bindFailed += 1;
+            continue;
+          }
+          const relinked = await relinkShareToRoadbook(item.link, item.snapshot, item.roadbook);
+          if (!relinked.ok) {
+            bindFailed += 1;
+            continue;
+          }
+          const index = nextShareLinks.findIndex((link) => shareLinkKey(link) === shareLinkKey(item.link));
+          if (index >= 0) nextShareLinks[index] = { ...nextShareLinks[index], roadbookId: item.roadbook.id, roadbookTitle: item.roadbook.title, ...(relinked.url ? { url: relinked.url } : {}) };
+        } catch {
           bindFailed += 1;
-          continue;
         }
-        const index = nextShareLinks.findIndex((link) => shareLinkKey(link) === shareLinkKey(item.link));
-        if (index >= 0) nextShareLinks[index] = { ...nextShareLinks[index], roadbookId: item.roadbook.id, roadbookTitle: item.roadbook.title, ...(relinked.url ? { url: relinked.url } : {}) };
       }
       saveLocalShareLinks(nextShareLinks, storageScope);
       setShareLinks(nextShareLinks);
@@ -2134,7 +2147,7 @@ export default function Home() {
     flash(replacingId ? `已把地点修改为「${result.name}」` : `已把「${result.name}」加入第 ${days.findIndex((day) => day.id === selectedDayId) + 1} 天`);
   }
 
-  async function commitRoadbooks(next: Roadbook[], successMessage: string, afterSave?: () => Promise<string | null>) {
+  async function commitRoadbooks(next: Roadbook[], successMessage: string, afterSave?: (saved: boolean) => Promise<string | null>) {
     const saveRevision = localDraftRevisionRef.current;
     if (localRoadbookSaveTimerRef.current !== null) window.clearTimeout(localRoadbookSaveTimerRef.current);
     localRoadbookSaveTimerRef.current = null;
@@ -2157,7 +2170,7 @@ export default function Home() {
       let message = saved ? successMessage : "云端保存失败，暂时保存在当前设备";
       if (afterSave) {
         try {
-          const extra = await afterSave();
+          const extra = await afterSave(saved);
           if (extra) message = `${message}，${extra}`;
         } catch {
           message = saved ? "路书已保存，但分享链接同步失败" : "云端保存失败，暂时保存在当前设备，分享链接同步失败";
@@ -2170,7 +2183,7 @@ export default function Home() {
       let message = "云端保存失败，暂时保存在当前设备";
       if (afterSave) {
         try {
-          const extra = await afterSave();
+          const extra = await afterSave(false);
           if (extra) message = `${message}，${extra}`;
         } catch {
           message = `${message}，分享链接同步失败`;
@@ -2185,7 +2198,7 @@ export default function Home() {
     if (readOnly) return;
     const next = roadbooks.map((roadbook) => roadbook.id === activeRoadbookId ? { ...roadbook, updated: "刚刚保存" } : roadbook);
     const updatedRoadbook = next.find((roadbook) => roadbook.id === activeRoadbookId);
-    void commitRoadbooks(next, "路书已保存到云端", updatedRoadbook ? () => syncCloudShareSnapshots(updatedRoadbook) : undefined);
+    void commitRoadbooks(next, "路书已保存到云端", updatedRoadbook ? (saved) => syncCloudShareSnapshots(updatedRoadbook, { cloud: saved }) : undefined);
   }
 
   function openRoadbook(id: string) {
@@ -2328,9 +2341,12 @@ export default function Home() {
     return browserUpdatedCount;
   }
 
-  async function syncCloudShareSnapshots(roadbook: Roadbook) {
+  async function syncCloudShareSnapshots(roadbook: Roadbook, options?: { cloud?: boolean }) {
     const snapshot = buildShareSnapshot(roadbook).snapshot;
     const browserUpdatedCount = syncBrowserShareSnapshots(roadbook, snapshot);
+    if (options?.cloud === false) {
+      return browserUpdatedCount ? `已同步 ${browserUpdatedCount} 个当前设备分享链接` : null;
+    }
 
     const listResponse = await fetch("/api/shares", { headers: { Accept: "application/json" }, cache: "no-store" });
     if (!listResponse.ok) return browserUpdatedCount ? `已同步 ${browserUpdatedCount} 个当前设备分享链接` : null;
