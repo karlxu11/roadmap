@@ -5,6 +5,7 @@ import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState
 import { flushSync } from "react-dom";
 import Link from "next/link";
 import { daxinganlingDays, initialDays as importedDays, tibetDays } from "./roadbook-data";
+import { localLibraryHasUnsyncedEdits, mergeRoadbookLibraries } from "./merge-roadbooks";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
 import { normalizedStayMinutes } from "./stay-time";
 
@@ -1312,21 +1313,22 @@ export default function Home() {
     fetchRemoteRoadbooks(storageScope).then(async (remotePayload) => {
       if (cancelled) return;
       if (remotePayload) {
-        // 未点击“保存路书”的本地草稿优先于云端快照，避免刷新时丢失编辑。
-        if (localDraftDirtyRef.current) {
-          setStorageStatus("local");
-          return;
-        }
         const remoteRoadbooks = remotePayload.roadbooks;
-        const preferredId = preferredRoadbookId(remoteRoadbooks, storageScope);
-        const preferredRoadbook = remoteRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? remoteRoadbooks[0];
-        setRoadbooksState(remoteRoadbooks);
-        saveRoadbooks(remoteRoadbooks, false, storageScope);
-        localDraftDirtyRef.current = false;
+        // 本机未保存草稿不再挡住云端。另一台设备/浏览器写入的新地点会合并进来；
+        // 只有本机多出来的修改才继续标成本地草稿。
+        const nextRoadbooks = localDraftDirtyRef.current
+          ? mergeRoadbookLibraries(localRoadbooks, remoteRoadbooks)
+          : remoteRoadbooks;
+        const keepLocalDraft = localDraftDirtyRef.current && localLibraryHasUnsyncedEdits(localRoadbooks, remoteRoadbooks);
+        const preferredId = preferredRoadbookId(nextRoadbooks, storageScope);
+        const preferredRoadbook = nextRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? nextRoadbooks[0];
+        setRoadbooksState(nextRoadbooks);
+        saveRoadbooks(nextRoadbooks, keepLocalDraft, storageScope);
+        localDraftDirtyRef.current = keepLocalDraft;
         setActiveRoadbookId(preferredRoadbook.id);
         setSelectedDayId(preferredRoadbook.days[0]?.id ?? "");
-        setStorageStatus("remote");
-        if (remotePayload.added) void saveRemoteRoadbooks(remoteRoadbooks);
+        setStorageStatus(keepLocalDraft ? "local" : "remote");
+        if (remotePayload.added) void saveRemoteRoadbooks(nextRoadbooks);
         return;
       }
       if (localDraftDirtyRef.current) {
