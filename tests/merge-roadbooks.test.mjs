@@ -113,6 +113,52 @@ test("keeps local stay time and note on a shared stop", () => {
   assert.equal(localLibraryHasUnsyncedEdits(local, remote), true);
 });
 
+test("does not reinsert a locally deleted stop that still exists on the last synced baseline", () => {
+  const baseline = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-moon", "石月亮观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const local = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const remote = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-moon", "石月亮观景台"),
+    stop("s-church", "老姆登基督教堂"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+
+  const merged = mergeRoadbookLibraries(local, remote, baseline);
+  assert.deepEqual(merged[0].days[0].stops.map((item) => item.id), ["s-start", "s-church", "s-hotel"]);
+  assert.equal(localLibraryHasUnsyncedEdits(local, remote, baseline), true);
+});
+
+test("does not reinsert a locally deleted day or roadbook from the last synced baseline", () => {
+  const baseline = [
+    book("rb-13", [
+      day("day-1", [stop("s-1", "益田村")]),
+      day("day-2", [stop("s-2", "大理古城")]),
+    ]),
+    book("rb-gone", [day("day-x", [stop("s-x", "旧路书")])]),
+  ];
+  const local = [book("rb-13", [day("day-1", [stop("s-1", "益田村")])])];
+  const remote = [
+    book("rb-13", [
+      day("day-1", [stop("s-1", "益田村")]),
+      day("day-2", [stop("s-2", "大理古城")]),
+      day("day-3", [stop("s-3", "飞来寺")]),
+    ]),
+    book("rb-gone", [day("day-x", [stop("s-x", "旧路书")])]),
+  ];
+
+  const merged = mergeRoadbookLibraries(local, remote, baseline);
+  assert.deepEqual(merged.map((item) => item.id), ["rb-13"]);
+  assert.deepEqual(merged[0].days.map((item) => item.id), ["day-1", "day-3"]);
+  assert.equal(localLibraryHasUnsyncedEdits(local, remote, baseline), true);
+});
+
 test("keeps a locally created roadbook that is not on the cloud yet", () => {
   const localBook = book("rb-local", [day("day-1", [stop("s-1", "益田村")])]);
   const remoteBook = book("rb-13", [day("day-8", [stop("s-church", "老姆登基督教堂")])]);

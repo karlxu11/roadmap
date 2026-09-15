@@ -119,6 +119,7 @@ const importedTibetDays: DayPlan[] = tibetDays as unknown as DayPlan[];
 
 const ROADBOOK_LIBRARY_KEY = "roadbook-library-v1";
 const ROADBOOK_DRAFT_META_KEY = "roadbook-library-v1-draft";
+const ROADBOOK_SYNCED_KEY = "roadbook-library-v1-synced";
 const ACTIVE_ROADBOOK_KEY = "roadbook-last-active-v1";
 const LEGACY_ROADBOOK_KEY = "roadbook-days-v2";
 const ROUTE_CACHE_KEY = "roadbook-route-cache-v1";
@@ -677,10 +678,21 @@ function rememberActiveRoadbook(id: string, storageScope = "legacy") {
   }
 }
 
+function loadSyncedRoadbooks(storageScope = "legacy"): Roadbook[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const saved = window.localStorage.getItem(scopedStorageKey(ROADBOOK_SYNCED_KEY, storageScope));
+    return saved ? normalizeStoredRoadbooks(JSON.parse(saved)) : [];
+  } catch {
+    return [];
+  }
+}
+
 function saveRoadbooks(roadbooks: Roadbook[], dirty = true, storageScope = "legacy") {
   try {
     window.localStorage.setItem(scopedStorageKey(ROADBOOK_LIBRARY_KEY, storageScope), JSON.stringify(roadbooks));
     window.localStorage.setItem(scopedStorageKey(ROADBOOK_DRAFT_META_KEY, storageScope), JSON.stringify({ dirty, updatedAt: Date.now() } satisfies RoadbookDraftMeta));
+    if (!dirty) window.localStorage.setItem(scopedStorageKey(ROADBOOK_SYNCED_KEY, storageScope), JSON.stringify(roadbooks));
     return true;
   } catch {
     return false;
@@ -1315,11 +1327,13 @@ export default function Home() {
       if (remotePayload) {
         const remoteRoadbooks = remotePayload.roadbooks;
         // 本机未保存草稿不再挡住云端。另一台设备/浏览器写入的新地点会合并进来；
-        // 只有本机多出来的修改才继续标成本地草稿。
+        // 只有本机多出来的修改才继续标成本地草稿。上次同步基线用来区分“云端新增”和“本机删除”。
+        const syncedRoadbooks = loadSyncedRoadbooks(storageScope);
+        const baseline = syncedRoadbooks.length ? syncedRoadbooks : undefined;
         const nextRoadbooks = localDraftDirtyRef.current
-          ? mergeRoadbookLibraries(localRoadbooks, remoteRoadbooks)
+          ? mergeRoadbookLibraries(localRoadbooks, remoteRoadbooks, baseline)
           : remoteRoadbooks;
-        const keepLocalDraft = localDraftDirtyRef.current && localLibraryHasUnsyncedEdits(localRoadbooks, remoteRoadbooks);
+        const keepLocalDraft = localDraftDirtyRef.current && localLibraryHasUnsyncedEdits(localRoadbooks, remoteRoadbooks, baseline);
         const preferredId = preferredRoadbookId(nextRoadbooks, storageScope);
         const preferredRoadbook = nextRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? nextRoadbooks[0];
         setRoadbooksState(nextRoadbooks);
