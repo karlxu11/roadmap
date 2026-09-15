@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { localLibraryHasUnsyncedEdits, mergeRoadbookLibraries } from "../app/merge-roadbooks.ts";
+import { localLibraryHasUnsyncedEdits, mergeRoadbookLibraries, resolveHydratedRoadbooks } from "../app/merge-roadbooks.ts";
 
 function stop(id, name, extra = {}) {
   return { id, name, area: "云南", kind: "景点", lat: 26, lng: 99, duration: "顺路打卡", ...extra };
@@ -157,6 +157,55 @@ test("does not reinsert a locally deleted day or roadbook from the last synced b
   assert.deepEqual(merged.map((item) => item.id), ["rb-13"]);
   assert.deepEqual(merged[0].days.map((item) => item.id), ["day-1", "day-3"]);
   assert.equal(localLibraryHasUnsyncedEdits(local, remote, baseline), true);
+});
+
+test("after observing a cloud-added stop, a later local delete is not reinserted on refresh", () => {
+  const synced = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const localWithOtherEdit = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台", { note: "早出发" }),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const remote = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-church", "老姆登基督教堂"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+
+  const first = resolveHydratedRoadbooks(true, localWithOtherEdit, remote, synced);
+  assert.deepEqual(first.roadbooks[0].days[0].stops.map((item) => item.id), ["s-start", "s-church", "s-hotel"]);
+  assert.equal(first.keepLocalDraft, true);
+
+  const localAfterDelete = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台", { note: "早出发" }),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const second = resolveHydratedRoadbooks(true, localAfterDelete, remote, remote);
+  assert.deepEqual(second.roadbooks[0].days[0].stops.map((item) => item.id), ["s-start", "s-hotel"]);
+  assert.equal(second.keepLocalDraft, true);
+});
+
+test("hydrate uses the latest local draft, not the snapshot from before the cloud request", () => {
+  const localAtFetchStart = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const latestLocal = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-mine", "雾里村"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+  const remote = [book("rb-13", [day("day-8", [
+    stop("s-start", "丙中洛观景台"),
+    stop("s-church", "老姆登基督教堂"),
+    stop("s-hotel", "泸水市"),
+  ])])];
+
+  const hydrated = resolveHydratedRoadbooks(true, latestLocal, remote, localAtFetchStart);
+  assert.ok(hydrated.roadbooks[0].days[0].stops.some((item) => item.id === "s-mine"));
+  assert.ok(hydrated.roadbooks[0].days[0].stops.some((item) => item.id === "s-church"));
 });
 
 test("keeps a locally created roadbook that is not on the cloud yet", () => {

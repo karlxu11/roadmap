@@ -5,7 +5,7 @@ import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState
 import { flushSync } from "react-dom";
 import Link from "next/link";
 import { daxinganlingDays, initialDays as importedDays, tibetDays } from "./roadbook-data";
-import { localLibraryHasUnsyncedEdits, mergeRoadbookLibraries } from "./merge-roadbooks";
+import { resolveHydratedRoadbooks } from "./merge-roadbooks";
 import { combineRoutePaths, hasDrawableRoutePath, normalizeRoutePath } from "./route-path";
 import { normalizedStayMinutes } from "./stay-time";
 
@@ -688,11 +688,20 @@ function loadSyncedRoadbooks(storageScope = "legacy"): Roadbook[] {
   }
 }
 
+function saveSyncedRoadbooks(roadbooks: Roadbook[], storageScope = "legacy") {
+  try {
+    window.localStorage.setItem(scopedStorageKey(ROADBOOK_SYNCED_KEY, storageScope), JSON.stringify(roadbooks));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function saveRoadbooks(roadbooks: Roadbook[], dirty = true, storageScope = "legacy") {
   try {
     window.localStorage.setItem(scopedStorageKey(ROADBOOK_LIBRARY_KEY, storageScope), JSON.stringify(roadbooks));
     window.localStorage.setItem(scopedStorageKey(ROADBOOK_DRAFT_META_KEY, storageScope), JSON.stringify({ dirty, updatedAt: Date.now() } satisfies RoadbookDraftMeta));
-    if (!dirty) window.localStorage.setItem(scopedStorageKey(ROADBOOK_SYNCED_KEY, storageScope), JSON.stringify(roadbooks));
+    if (!dirty) saveSyncedRoadbooks(roadbooks, storageScope);
     return true;
   } catch {
     return false;
@@ -1326,14 +1335,16 @@ export default function Home() {
       if (cancelled) return;
       if (remotePayload) {
         const remoteRoadbooks = remotePayload.roadbooks;
-        // 本机未保存草稿不再挡住云端。另一台设备/浏览器写入的新地点会合并进来；
-        // 只有本机多出来的修改才继续标成本地草稿。上次同步基线用来区分“云端新增”和“本机删除”。
-        const syncedRoadbooks = loadSyncedRoadbooks(storageScope);
-        const baseline = syncedRoadbooks.length ? syncedRoadbooks : undefined;
-        const nextRoadbooks = localDraftDirtyRef.current
-          ? mergeRoadbookLibraries(localRoadbooks, remoteRoadbooks, baseline)
-          : remoteRoadbooks;
-        const keepLocalDraft = localDraftDirtyRef.current && localLibraryHasUnsyncedEdits(localRoadbooks, remoteRoadbooks, baseline);
+        // 本机未保存草稿不再挡住云端。用“上次已观察的云端快照”区分新增和删除；
+        // 请求返回时先落盘再读最新本机草稿，避免拉取期间的编辑被旧闭包盖掉。
+        flushScheduledRoadbookSave();
+        const latestLocalRoadbooks = loadRoadbooks(storageScope);
+        const previousSynced = loadSyncedRoadbooks(storageScope);
+        const baseline = previousSynced.length ? previousSynced : undefined;
+        const hydrated = resolveHydratedRoadbooks(localDraftDirtyRef.current, latestLocalRoadbooks, remoteRoadbooks, baseline);
+        const nextRoadbooks = hydrated.roadbooks;
+        const keepLocalDraft = hydrated.keepLocalDraft;
+        saveSyncedRoadbooks(remoteRoadbooks, storageScope);
         const preferredId = preferredRoadbookId(nextRoadbooks, storageScope);
         const preferredRoadbook = nextRoadbooks.find((roadbook) => roadbook.id === preferredId) ?? nextRoadbooks[0];
         setRoadbooksState(nextRoadbooks);

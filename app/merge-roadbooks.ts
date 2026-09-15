@@ -150,6 +150,19 @@ function hasLocalDeletes<T extends { id: string }>(localItems: T[], remoteItems:
   return baselineItems.some((item) => remoteIds.has(item.id) && !localIds.has(item.id));
 }
 
+export function resolveHydratedRoadbooks<T extends MergeRoadbook>(
+  dirty: boolean,
+  latestLocal: T[],
+  remote: T[],
+  baseline?: T[],
+) {
+  if (!dirty) return { roadbooks: remote, keepLocalDraft: false };
+  return {
+    roadbooks: mergeRoadbookLibraries(latestLocal, remote, baseline),
+    keepLocalDraft: localLibraryHasUnsyncedEdits(latestLocal, remote, baseline),
+  };
+}
+
 export function localLibraryHasUnsyncedEdits(local: MergeRoadbook[], remote: MergeRoadbook[], baseline?: MergeRoadbook[]) {
   if (hasLocalDeletes(local, remote, baseline)) return true;
   const remoteBooks = byId(remote);
