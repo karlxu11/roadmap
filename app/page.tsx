@@ -17,6 +17,7 @@ type Stop = {
   lat: number;
   lng: number;
   duration: string;
+  stayMinutes?: number;
   note?: string;
 };
 type MapMarkerStop = Stop & { mapLabel?: string };
@@ -513,6 +514,7 @@ function normalizeStoredStop(value: unknown): Stop | null {
   const lng = typeof raw.lng === "number" ? raw.lng : Number(raw.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
   const kind: StopKind = raw.kind === "出发" || raw.kind === "途经" || raw.kind === "住宿" || raw.kind === "景点" ? raw.kind : "景点";
+  const stayMinutes = normalizedStayMinutes(raw.stayMinutes);
   return {
     id: typeof raw.id === "string" && raw.id.trim() ? raw.id : uid("stop"),
     name: typeof raw.name === "string" && raw.name.trim() ? raw.name : "未命名地点",
@@ -521,6 +523,7 @@ function normalizeStoredStop(value: unknown): Stop | null {
     lat,
     lng,
     duration: typeof raw.duration === "string" && raw.duration.trim() ? raw.duration : "待安排",
+    ...(stayMinutes ? { stayMinutes } : {}),
     ...(typeof raw.note === "string" && raw.note.trim() ? { note: raw.note } : {}),
   };
 }
@@ -865,6 +868,39 @@ function formatSearchResultMeta(result: SearchResult) {
   return parts.join(" · ");
 }
 
+const STAY_OPTIONS = [
+  { minutes: 0, label: "不停留" },
+  { minutes: 30, label: "30 分钟" },
+  { minutes: 60, label: "1 小时" },
+  { minutes: 90, label: "1.5 小时" },
+  { minutes: 120, label: "2 小时" },
+  { minutes: 150, label: "2.5 小时" },
+  { minutes: 180, label: "3 小时" },
+  { minutes: 240, label: "4 小时" },
+  { minutes: 300, label: "5 小时" },
+  { minutes: 360, label: "6 小时" },
+] as const;
+
+function normalizedStayMinutes(value: unknown) {
+  const minutes = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+  return Math.min(16 * 60, Math.round(minutes));
+}
+
+function stopStayMinutes(stop: Stop) {
+  return stop.kind === "出发" ? 0 : normalizedStayMinutes(stop.stayMinutes);
+}
+
+function stayOptionsFor(minutes: number) {
+  if (STAY_OPTIONS.some((option) => option.minutes === minutes)) return STAY_OPTIONS;
+  return [...STAY_OPTIONS, { minutes, label: formatStayLabel(minutes) }];
+}
+
+function formatStayLabel(minutes: number) {
+  if (minutes <= 0) return "不停留";
+  return formatDuration(minutes * 60);
+}
+
 function formatDuration(seconds?: number) {
   if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "待计算";
   const minutes = Math.max(1, Math.round(seconds / 60));
@@ -1102,11 +1138,18 @@ export default function Home() {
   const routeDuration = routeSummary ? formatDuration(routeSummary.duration) : selectedDay.stops.length < 2 ? "待规划" : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : mapReady ? "正在计算" : "待规划";
   const departureStop = selectedDay.stops.find((stop) => stop.kind === "出发");
   const departureTime = departureStop ? extractClock(departureStop.duration) : "09:00";
-  const stopArrivalTimes = useMemo(() => {
+  const stopSchedule = useMemo(() => {
     let elapsedSeconds = 0;
     let canCalculate = true;
     const arrivalTimes = selectedDay.stops.map(() => "");
+    const leaveTimes = selectedDay.stops.map(() => "");
+    if (selectedDay.stops[0]) leaveTimes[0] = departureTime;
     selectedDay.stops.slice(0, -1).forEach((stop, index) => {
+      if (index > 0) {
+        const staySeconds = stopStayMinutes(stop) * 60;
+        if (arrivalTimes[index]) leaveTimes[index] = addDurationToClock(arrivalTimes[index], staySeconds);
+        if (canCalculate) elapsedSeconds += staySeconds;
+      }
       const metric = displayLegMetrics[stop.id];
       if (!canCalculate || metric?.status !== "ready" || typeof metric.duration !== "number") {
         canCalculate = false;
@@ -1115,8 +1158,19 @@ export default function Home() {
       elapsedSeconds += metric.duration;
       arrivalTimes[index + 1] = addDurationToClock(departureTime, elapsedSeconds);
     });
-    return arrivalTimes;
+    const lastIndex = selectedDay.stops.length - 1;
+    if (lastIndex >= 0 && arrivalTimes[lastIndex]) {
+      leaveTimes[lastIndex] = addDurationToClock(arrivalTimes[lastIndex], stopStayMinutes(selectedDay.stops[lastIndex]) * 60);
+    }
+    return { arrivalTimes, leaveTimes };
   }, [departureTime, displayLegMetrics, selectedDay.stops]);
+  const stopArrivalTimes = stopSchedule.arrivalTimes;
+  const stopLeaveTimes = stopSchedule.leaveTimes;
+  const dayStaySeconds = selectedDay.stops.reduce((sum, stop) => sum + stopStayMinutes(stop) * 60, 0);
+  const lastArrivalTime = selectedDay.stops.length === 1 ? departureTime : stopArrivalTimes[selectedDay.stops.length - 1];
+  const dayEndTime = lastArrivalTime
+    ? addDurationToClock(lastArrivalTime, stopStayMinutes(selectedDay.stops[selectedDay.stops.length - 1]) * 60)
+    : "";
   const selectedDayCalendarDate = new Date(getRoadbookStartDate(starterTrip));
   selectedDayCalendarDate.setDate(selectedDayCalendarDate.getDate() + selectedDayIndex);
   const selectedDayDateValue = formatCalendarDate(selectedDayCalendarDate);
@@ -1865,6 +1919,11 @@ export default function Home() {
     updateStop(stopId, (stop) => ({ ...stop, duration: `${time} 出发` }));
   }
 
+  function updateStayMinutes(stopId: string, minutes: number) {
+    const stayMinutes = normalizedStayMinutes(minutes);
+    updateStop(stopId, (stop) => stayMinutes ? { ...stop, stayMinutes } : { ...stop, stayMinutes: undefined });
+  }
+
   function updateRoadbookStartDate(value: string) {
     const startDate = parseCalendarDate(value);
     if (!startDate || readOnly) return;
@@ -1993,7 +2052,7 @@ export default function Home() {
       const stops = day.stops
         .filter((stop) => stop.id !== stopId)
         .map((stop) => stop.id === previousDeparture?.id ? { ...stop, kind: "途经" as const, duration: "顺路停靠" } : stop);
-      return { ...day, stops: [{ ...selected, kind: "出发", duration: departureDuration }, ...stops] };
+      return { ...day, stops: [{ ...selected, kind: "出发", duration: departureDuration, stayMinutes: undefined }, ...stops] };
     });
     flash("已将该地点设为出发点");
   }
@@ -2135,6 +2194,7 @@ export default function Home() {
       lat: result.location?.lat ?? fallback?.lat ?? 30.657,
       lng: result.location?.lng ?? fallback?.lng ?? 104.066,
       duration: editingStop?.duration ?? (isFirstStop ? "09:00 出发" : "待安排"),
+      ...(editingStop && stopStayMinutes(editingStop) ? { stayMinutes: stopStayMinutes(editingStop) } : {}),
       ...(editingStop?.note ? { note: editingStop.note } : {}),
     };
     const replacingId = editingStop?.id;
@@ -2589,7 +2649,7 @@ export default function Home() {
             <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => openPlaceSearch()}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "正在补齐全程路线…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
-          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当日日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当日日期" onInput={(event) => updateSelectedDayDate(event.currentTarget.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中…" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
+          <div className="stats-strip"><div className="date-stat"><span className="stat-label">当日日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当日日期" onInput={(event) => updateSelectedDayDate(event.currentTarget.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">游玩停留</span><strong>{dayStaySeconds ? formatDuration(dayStaySeconds) : "未安排"}</strong></div><div><span className="stat-label">预计结束</span><strong>{dayEndTime || "待规划"}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中…" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
 
           <div className="stops-section">
             <div className="section-heading"><div><div className="eyebrow">DAY {String(days.findIndex((day) => day.id === selectedDayId) + 1).padStart(2, "0")} / TIMELINE</div><h2>这一天，去哪里</h2></div><span className="section-note">{readOnly ? "路径、费用和时间以分享时记录为准" : "拖动顺序也可以，先把想去的地方放进来"}</span></div>
@@ -2613,14 +2673,18 @@ export default function Home() {
                         </> : <div className="stop-destination-line">
                           <span className={`kind-pill ${stop.kind === "住宿" ? "green" : ""}`}>{stop.kind}</span>
                           <h3 className="stop-inline-name">{stop.name}</h3>
-                          {stopArrivalTimes[index] && <span className="stop-arrival">预计 {stopArrivalTimes[index]} 到达</span>}
+                          <div className="stop-time-row">
+                            {stopArrivalTimes[index] && <span className="stop-arrival">预计 {stopArrivalTimes[index]} 到达</span>}
+                            {readOnly ? (stopStayMinutes(stop) > 0 && <span className="stop-stay">停留 {formatStayLabel(stopStayMinutes(stop))}</span>) : <label className="stay-control"><span>停留</span><select className="stay-time" value={stopStayMinutes(stop)} aria-label={`修改${stop.name}停留时间`} onChange={(event) => updateStayMinutes(stop.id, Number(event.target.value))}>{stayOptionsFor(stopStayMinutes(stop)).map((option) => <option key={option.minutes} value={option.minutes}>{option.label}</option>)}</select></label>}
+                            {stopStayMinutes(stop) > 0 && stopLeaveTimes[index] && <span className="stop-leave">{stopLeaveTimes[index]} 离开</span>}
+                          </div>
                           {index < selectedDay.stops.length - 1 && <div className="leg-summary"><span>↘</span>{displayLegMetrics[stop.id]?.status === "loading" ? "正在计算路线…" : displayLegMetrics[stop.id]?.status === "ready" ? <>约 {formatDistance(displayLegMetrics[stop.id].distance)} · {formatDuration(displayLegMetrics[stop.id].duration)}</> : readOnly ? "分享时未记录该路段" : "路线距离待加载"}</div>}
                         </div>}
                         <a className="stop-navigation-button" href={amapStopNavigationUrl(stop)} target="_blank" rel="noreferrer">导航到这里 ↗</a>
                       </div>
                       {!readOnly && <div className="stop-tools">{stop.kind !== "出发" && <button className="set-departure-button" type="button" onClick={() => setStopAsDeparture(stop.id)} aria-label={`将${stop.name}设为出发点`}>设为出发</button>}<button type="button" onClick={() => openPlaceSearch(stop.id)} aria-label={`修改${stop.name}`}>✎</button><button type="button" onClick={() => moveStop(stop.id, -1)} aria-label="上移地点">↑</button><button type="button" onClick={() => moveStop(stop.id, 1)} aria-label="下移地点">↓</button><button type="button" onClick={() => removeStop(stop.id)} aria-label="删除地点">×</button></div>}
                     </div>
-                    {index === selectedDay.stops.length - 1 && <div className="trip-total-summary"><span>总时长</span><strong>{routeSummary ? formatDuration(routeSummary.duration) : selectedDay.stops.length < 2 ? "待规划" : readOnly ? "未记录" : mapReady ? "正在计算…" : "待连接高德"}</strong>{routeSummary && <span className="toll-summary">高速费 {formatTolls(routeSummary.tolls)}</span>}{days.at(-1)?.id === selectedDay.id && <span className="toll-summary total-toll-summary">全程高速费 {allRoadbookTolls.complete ? formatTolls(allRoadbookTolls.amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span>}</div>}
+                    {index === selectedDay.stops.length - 1 && <div className="trip-total-summary"><span>总时长</span><strong>{routeSummary ? formatDuration(routeSummary.duration + dayStaySeconds) : selectedDay.stops.length < 2 ? "待规划" : readOnly ? "未记录" : mapReady ? "正在计算…" : "待连接高德"}</strong>{dayStaySeconds > 0 && <span className="stay-summary">含停留 {formatDuration(dayStaySeconds)}</span>}{routeSummary && <span className="toll-summary">高速费 {formatTolls(routeSummary.tolls)}</span>}{days.at(-1)?.id === selectedDay.id && <span className="toll-summary total-toll-summary">全程高速费 {allRoadbookTolls.complete ? formatTolls(allRoadbookTolls.amount) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待获取"}</span>}</div>}
                     {!readOnly && editingNoteStopId === stop.id && <div className="stop-note-editor"><textarea value={noteDraft} maxLength={200} autoFocus aria-label={`编辑${stop.name}备注`} placeholder="写下这个途经点的提醒，例如：补能、吃饭或拍照" onChange={(event) => setNoteDraft(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveStopNote(stop.id); if (event.key === "Escape") cancelNoteEdit(); }} /><div className="stop-note-actions"><small>{noteDraft.length}/200 · ⌘↵ 保存</small><div><button type="button" onClick={cancelNoteEdit}>取消</button><button className="save-note-button" type="button" onClick={() => saveStopNote(stop.id)}>保存备注</button></div></div></div>}
                     {!readOnly && editingNoteStopId !== stop.id && <div className={`stop-note ${stop.note ? "has-note" : "empty-note"}`}><span>✦</span>{stop.note ? <><span className="note-text">{stop.note}</span><button type="button" onClick={() => startNoteEdit(stop)}>编辑</button></> : <button type="button" onClick={() => startNoteEdit(stop)}>添加备注</button>}</div>}
                     {readOnly && stop.note && <div className="stop-note has-note"><span>✦</span><span className="note-text">{stop.note}</span></div>}
@@ -2688,6 +2752,7 @@ function PrintRoadbook({ roadbook, routeCache }: { roadbook: Roadbook; routeCach
       const metrics = day.stops.slice(0, -1).map((stop, stopIndex) => routeCache.legs[legCacheKey(stop, day.stops[stopIndex + 1])]);
       const totalDistance = metrics.reduce((sum, metric) => sum + (metric?.distance ?? 0), 0);
       const totalDuration = metrics.reduce((sum, metric) => sum + (metric?.duration ?? 0), 0);
+      const staySeconds = day.stops.reduce((sum, stop) => sum + stopStayMinutes(stop) * 60, 0);
       const hasCompleteMetrics = metrics.length > 0 && metrics.every(Boolean);
       return <section className="print-day" key={day.id}>
         <div className="print-day-heading"><span>DAY {String(dayIndex + 1).padStart(2, "0")}</span><small>{day.date}</small></div>
@@ -2698,13 +2763,13 @@ function PrintRoadbook({ roadbook, routeCache }: { roadbook: Roadbook; routeCach
           const metric = nextStop ? metrics[stopIndex] : undefined;
           return <li key={stop.id}>
             <strong>{stop.name}</strong>
-            <span>{stop.kind} · {stop.duration}</span>
+            <span>{stop.kind} · {stop.duration}{stopStayMinutes(stop) > 0 ? ` · 停留 ${formatStayLabel(stopStayMinutes(stop))}` : ""}</span>
             <small>{stop.area}</small>
             {nextStop && <small className="print-leg">↘ 约 {metric ? formatDistance(metric.distance) : "距离待计算"} · {metric ? formatDuration(metric.duration) : "驾驶时间待计算"}</small>}
             {stop.note && <em>{stop.note}</em>}
           </li>;
         })}</ol>
-        <div className="print-day-total"><span>当天驾驶</span><strong>{hasCompleteMetrics ? `${formatDistance(totalDistance)} · ${formatDuration(totalDuration)}` : "部分路线尚未计算"}</strong></div>
+        <div className="print-day-total"><span>当天驾驶</span><strong>{hasCompleteMetrics ? `${formatDistance(totalDistance)} · ${formatDuration(totalDuration)}` : "部分路线尚未计算"}</strong>{staySeconds > 0 && <span>停留 {formatDuration(staySeconds)}</span>}</div>
       </section>;
     })}
     <footer className="print-footer">路书 · ROAM NOTE | 由高德路线数据辅助整理</footer>

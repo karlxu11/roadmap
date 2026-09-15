@@ -28,6 +28,8 @@ test("server-renders the roadbook workspace", async () => {
   assert.match(html, /当日日期/);
   assert.match(html, /value="2026-04-29"/);
   assert.match(html, /总时长/);
+  assert.match(html, /游玩停留/);
+  assert.match(html, /预计结束/);
   assert.match(html, /全程地图总览/);
   assert.doesNotMatch(html, /全程总里程/);
   assert.match(html, /截至当前累计总里程/);
