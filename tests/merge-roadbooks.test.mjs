@@ -54,10 +54,46 @@ test("keeps a locally added stop that cloud does not have yet", () => {
   const merged = mergeRoadbookLibraries(local, remote);
   assert.deepEqual(merged[0].days[0].stops.map((item) => item.name), [
     "丙中洛观景台",
-    "雾里村",
     "老姆登基督教堂",
+    "雾里村",
     "泸水市",
   ]);
+  assert.equal(localLibraryHasUnsyncedEdits(local, remote), true);
+});
+
+test("keeps a local stop reorder and inserts the cloud-only stop after its remote neighbor", () => {
+  const local = [book("rb-13", [day("day-8", [
+    stop("s-a", "石月亮观景台"),
+    stop("s-c", "飞来石"),
+    stop("s-b", "知子罗"),
+  ])])];
+  const remote = [book("rb-13", [day("day-8", [
+    stop("s-a", "石月亮观景台"),
+    stop("s-b", "知子罗"),
+    stop("s-x", "老姆登基督教堂"),
+    stop("s-c", "飞来石"),
+  ])])];
+
+  const merged = mergeRoadbookLibraries(local, remote);
+  assert.deepEqual(merged[0].days[0].stops.map((item) => item.id), ["s-a", "s-c", "s-b", "s-x"]);
+  assert.equal(localLibraryHasUnsyncedEdits(local, remote), true);
+});
+
+test("keeps a local day reorder and still picks up a cloud-only day", () => {
+  const local = [book("rb-13", [
+    day("day-1", [stop("s-1", "益田村")], { title: "深圳 → 百色" }),
+    day("day-3", [stop("s-3", "飞来寺")], { title: "大理 → 飞来寺" }),
+    day("day-2", [stop("s-2", "大理古城")], { title: "百色 → 大理" }),
+  ])];
+  const remote = [book("rb-13", [
+    day("day-1", [stop("s-1", "益田村")], { title: "深圳 → 百色" }),
+    day("day-2", [stop("s-2", "大理古城")], { title: "百色 → 大理" }),
+    day("day-4", [stop("s-4", "雨崩上村")], { title: "进雨崩" }),
+    day("day-3", [stop("s-3", "飞来寺")], { title: "大理 → 飞来寺" }),
+  ])];
+
+  const merged = mergeRoadbookLibraries(local, remote);
+  assert.deepEqual(merged[0].days.map((item) => item.id), ["day-1", "day-3", "day-2", "day-4"]);
   assert.equal(localLibraryHasUnsyncedEdits(local, remote), true);
 });
 

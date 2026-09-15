@@ -46,68 +46,65 @@ function mergeStop(local: MergeStop, remote: MergeStop): MergeStop {
   };
 }
 
-function mergeStops(localStops: MergeStop[], remoteStops: MergeStop[]) {
-  const localById = byId(localStops);
-  const merged: MergeStop[] = remoteStops.map((remote) => {
-    const local = localById.get(remote.id);
-    return local ? mergeStop(local, remote) : remote;
-  });
-  const mergedIds = new Set(merged.map((stop) => stop.id));
-
-  localStops.forEach((stop, index) => {
-    if (mergedIds.has(stop.id)) return;
-    let insertAt = -1;
+function mergeOrdered<T extends { id: string }>(localItems: T[], remoteItems: T[], mergeItem: (local: T, remote: T) => T) {
+  const localIds = new Set(localItems.map((item) => item.id));
+  const remoteById = byId(remoteItems);
+  const extras: Array<{ item: T; anchor: string | null }> = [];
+  remoteItems.forEach((item, index) => {
+    if (localIds.has(item.id)) return;
+    let anchor: string | null = null;
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      const neighbor = merged.findIndex((item) => item.id === localStops[cursor].id);
-      if (neighbor >= 0) {
-        insertAt = neighbor + 1;
+      if (localIds.has(remoteItems[cursor].id)) {
+        anchor = remoteItems[cursor].id;
         break;
       }
     }
-    if (insertAt < 0) insertAt = merged[0] ? 1 : 0;
-    merged.splice(insertAt, 0, stop);
-    mergedIds.add(stop.id);
+    extras.push({ item, anchor });
   });
-  return merged;
+
+  const result: T[] = [];
+  const placed = new Set<string>();
+  const flush = (anchor: string | null) => {
+    for (const extra of extras) {
+      if (extra.anchor !== anchor || placed.has(extra.item.id)) continue;
+      result.push(extra.item);
+      placed.add(extra.item.id);
+    }
+  };
+
+  flush(null);
+  for (const local of localItems) {
+    const remote = remoteById.get(local.id);
+    result.push(remote ? mergeItem(local, remote) : local);
+    placed.add(local.id);
+    flush(local.id);
+  }
+  return result;
 }
 
-function mergeDay(local: MergeDay | undefined, remote: MergeDay): MergeDay {
-  if (!local) return remote;
+function mergeDay(local: MergeDay, remote: MergeDay): MergeDay {
   return {
     ...remote,
     date: local.date,
     title: local.title,
     subtitle: local.subtitle,
-    stops: mergeStops(local.stops, remote.stops),
+    stops: mergeOrdered(local.stops, remote.stops, mergeStop),
   };
 }
 
-function mergeRoadbook(local: MergeRoadbook | undefined, remote: MergeRoadbook): MergeRoadbook {
-  if (!local) return remote;
-  const localDays = byId(local.days);
-  const days = remote.days.map((day) => mergeDay(localDays.get(day.id), day));
-  const remoteDayIds = new Set(remote.days.map((day) => day.id));
-  for (const day of local.days) {
-    if (!remoteDayIds.has(day.id)) days.push(day);
-  }
+function mergeRoadbook(local: MergeRoadbook, remote: MergeRoadbook): MergeRoadbook {
   return {
     ...remote,
     title: local.title,
     description: local.description,
     region: local.region,
     ...(local.startDate ? { startDate: local.startDate } : remote.startDate ? { startDate: remote.startDate } : {}),
-    days,
+    days: mergeOrdered(local.days, remote.days, mergeDay),
   };
 }
 
 export function mergeRoadbookLibraries<T extends MergeRoadbook>(local: T[], remote: T[]): T[] {
-  const localById = byId(local);
-  const merged = remote.map((book) => mergeRoadbook(localById.get(book.id), book) as T);
-  const remoteIds = new Set(remote.map((book) => book.id));
-  for (const book of local) {
-    if (!remoteIds.has(book.id)) merged.push(book);
-  }
-  return merged;
+  return mergeOrdered(local, remote, (localBook, remoteBook) => mergeRoadbook(localBook, remoteBook) as T);
 }
 
 function stopFields(stop: MergeStop) {
@@ -123,18 +120,29 @@ function stopFields(stop: MergeStop) {
   });
 }
 
+function sharedOrderDiffers<T extends { id: string }>(localItems: T[], remoteItems: T[]) {
+  const remoteIds = new Set(remoteItems.map((item) => item.id));
+  const localIds = new Set(localItems.map((item) => item.id));
+  const localShared = localItems.map((item) => item.id).filter((id) => remoteIds.has(id));
+  const remoteShared = remoteItems.map((item) => item.id).filter((id) => localIds.has(id));
+  return localShared.join("\0") !== remoteShared.join("\0");
+}
+
 export function localLibraryHasUnsyncedEdits(local: MergeRoadbook[], remote: MergeRoadbook[]) {
   const remoteBooks = byId(remote);
+  if (sharedOrderDiffers(local, remote)) return true;
   for (const book of local) {
     const remoteBook = remoteBooks.get(book.id);
     if (!remoteBook) return true;
     if (book.title !== remoteBook.title || book.description !== remoteBook.description || book.region !== remoteBook.region) return true;
     if ((book.startDate ?? "") !== (remoteBook.startDate ?? "")) return true;
+    if (sharedOrderDiffers(book.days, remoteBook.days)) return true;
     const remoteDays = byId(remoteBook.days);
     for (const day of book.days) {
       const remoteDay = remoteDays.get(day.id);
       if (!remoteDay) return true;
       if (day.date !== remoteDay.date || day.title !== remoteDay.title || day.subtitle !== remoteDay.subtitle) return true;
+      if (sharedOrderDiffers(day.stops, remoteDay.stops)) return true;
       const remoteStops = byId(remoteDay.stops);
       for (const stop of day.stops) {
         const remoteStop = remoteStops.get(stop.id);
