@@ -100,14 +100,19 @@ button { cursor: pointer; }
 .share-mode-label { display: grid; gap: 3px; text-align: right; color: var(--deep); font-size: 11px; font-weight: 800; }
 .share-mode-label small { color: #99a49a; font-size: 9px; font-weight: 500; }
 .read-only-view .editor-pane { background: #fffefa; }
-.read-only-view .departure-date, .read-only-view .departure-time, .read-only-view .title-row input, .read-only-view .subtitle-input { cursor: default; }
-.read-only-view .departure-date, .read-only-view .departure-time { border-color: #e5e8e0; background: #fafbf7; }
+.read-only-view .departure-date, .read-only-view .departure-time, .read-only-view .stay-time, .read-only-view .title-row input, .read-only-view .subtitle-input { cursor: default; }
+.read-only-view .departure-date, .read-only-view .departure-time, .read-only-view .stay-time { border-color: #e5e8e0; background: #fafbf7; }
 .leg-summary { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 0 0 5px; color: #a1aaa0; font-size: 11px; line-height: 1.45; }
 .leg-summary > span:first-child { color: var(--orange); font-size: 14px; }
 .stop-arrival { margin: 0 0 5px; color: #b07f5d; font-size: 11px; font-weight: 700; }
+.stop-time-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.stop-stay, .stop-leave { color: #8a6a4e; font-size: 11px; font-weight: 700; }
+.stay-control { display: inline-flex; align-items: center; gap: 6px; color: #8a6a4e; font-size: 11px; font-weight: 700; }
+.stay-time { width: auto; min-width: 92px; padding: 5px 8px; border: 1px solid #e5a486; border-radius: 4px; outline: 0; background: #fffaf3; color: #8c4b35; font: inherit; font-size: 12px; }
+.stay-time:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(220, 107, 63, .12); }
 .stop-destination-line { display: flex; align-items: baseline; gap: 11px; flex-wrap: wrap; }
 .stop-inline-name { margin: 0 !important; }
-.stop-destination-line .stop-arrival, .stop-destination-line .leg-summary { margin: 0; }
+.stop-destination-line .stop-arrival, .stop-destination-line .leg-summary, .stop-destination-line .stop-time-row { margin: 0; }
 .departure-time { width: 96px; padding: 7px 8px; border: 1px solid #e5a486; border-radius: 4px; outline: 0; background: #fffaf3; color: #8c978d; font: inherit; font-size: 13px; }
 .departure-time:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(220, 107, 63, .12); }
 .trip-total-summary { display: flex; align-items: baseline; gap: 10px; margin: 7px 0 19px 47px; padding: 12px 13px; border-left: 2px solid #d7e1d2; background: #f8faf5; color: #8b978c; font-size: 12px; }
@@ -582,6 +587,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .stop-content p { color: #828d9e; font-size: 13px; line-height: 1.5; }
 .stop-destination-line { gap: 9px; }
 .stop-arrival { color: #a55034; font-size: 12px; }
+.stop-time-row { gap: 8px; }
+.stop-stay, .stop-leave { color: #8d5a40; font-size: 12px; }
+.stay-control { color: #8d5a40; font-size: 12px; }
+.stay-time { min-width: 98px; padding: 5px 7px; border-color: #fed2c2; border-radius: 7px; background: #fff9f6; color: #8c4b35; font-size: 13px; }
 .leg-summary { color: #8792a2; font-size: 13px; }
 .leg-summary > span:first-child { color: var(--blue); }
 .stop-tools { gap: 4px; }
@@ -788,7 +797,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .stop-content { padding: 14px 13px; border-radius: 12px; }
   .stop-main { gap: 8px; }
   .stop-destination-line { display: grid; grid-template-columns: auto 1fr; align-items: center; }
-  .stop-destination-line .stop-arrival, .stop-destination-line .leg-summary { grid-column: 2; }
+  .stop-destination-line .stop-arrival, .stop-destination-line .leg-summary, .stop-destination-line .stop-time-row { grid-column: 2; }
   .stop-tools { opacity: 1; }
   .stop-tools button { width: 28px; height: 28px; }
   .set-departure-button { display: none; }
