@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable jsx-a11y/no-autofocus -- the note editor opens for immediate keyboard entry. */
 
-import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import Link from "next/link";
 import { daxinganlingDays, initialDays as importedDays, tibetDays } from "./roadbook-data";
@@ -947,7 +947,55 @@ function amapNavigationUrl(stops: Stop[]) {
   if (stops.length < 2) return "https://www.amap.com/";
   const start = stops[0];
   const end = stops.at(-1)!;
-  return `https://uri.amap.com/navigation?from=${start.lng},${start.lat},${encodeURIComponent(start.name)}&to=${end.lng},${end.lat},${encodeURIComponent(end.name)}&mode=car&policy=1`;
+  const url = new URL("https://uri.amap.com/navigation");
+  url.searchParams.set("from", `${start.lng},${start.lat},${start.name}`);
+  url.searchParams.set("to", `${end.lng},${end.lat},${end.name}`);
+  const firstWaypoint = stops[1];
+  if (stops.length > 2 && firstWaypoint) {
+    url.searchParams.set("via", `${firstWaypoint.lng},${firstWaypoint.lat},${firstWaypoint.name}`);
+  }
+  url.searchParams.set("mode", "car");
+  url.searchParams.set("policy", "1");
+  return url.toString();
+}
+
+function amapMobileNavigationUrl(stops: Stop[]) {
+  if (stops.length < 2 || typeof navigator === "undefined") return null;
+  const userAgent = navigator.userAgent;
+  const isIOS = /iPhone|iPad|iPod/i.test(userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/i.test(userAgent);
+  if (!isIOS && !isAndroid) return null;
+
+  const start = stops[0];
+  const end = stops.at(-1)!;
+  const waypoints = stops.slice(1, -1);
+  const url = new URL(isIOS ? "iosamap://path" : "amapuri://route/plan/");
+  url.searchParams.set("sourceApplication", "roadbook");
+  url.searchParams.set("sid", "");
+  url.searchParams.set("slat", String(start.lat));
+  url.searchParams.set("slon", String(start.lng));
+  url.searchParams.set("sname", start.name);
+  url.searchParams.set("did", "");
+  url.searchParams.set("dlat", String(end.lat));
+  url.searchParams.set("dlon", String(end.lng));
+  url.searchParams.set("dname", end.name);
+  url.searchParams.set("dev", "0");
+  url.searchParams.set("t", "0");
+  url.searchParams.set("m", "4");
+  if (waypoints.length) {
+    url.searchParams.set("vian", String(waypoints.length));
+    url.searchParams.set("vialons", waypoints.map((stop) => stop.lng).join("|"));
+    url.searchParams.set("vialats", waypoints.map((stop) => stop.lat).join("|"));
+    url.searchParams.set("vianames", waypoints.map((stop) => stop.name).join("|"));
+  }
+  return url.toString();
+}
+
+function navigateWithAmapApp(event: ReactMouseEvent<HTMLAnchorElement>, stops: Stop[]) {
+  const url = amapMobileNavigationUrl(stops);
+  if (!url) return;
+  event.preventDefault();
+  window.location.href = url;
 }
 
 function amapStopNavigationUrl(stop: Stop) {
@@ -1037,6 +1085,8 @@ export default function Home() {
   const isShareOverview = readOnly && shareMapMode === "overview";
   const isRoadbookOverview = isShareOverview || (!readOnly && editorMapMode === "overview");
   const overviewStops = useMemo(() => days.flatMap((day) => day.stops), [days]);
+  const overviewNavigationStops = overviewStops.length > 1 ? [overviewStops[0], overviewStops.at(-1)!] : overviewStops;
+  const mapNavigationStops = isRoadbookOverview ? overviewNavigationStops : selectedDay.stops;
   const overviewMapMarkers = useMemo(() => days.flatMap((day, index) => {
     const departure = day.stops[0];
     const finalStop = day.stops.at(-1);
@@ -2718,7 +2768,7 @@ export default function Home() {
               <div className="title-row"><input readOnly={readOnly} aria-label="编辑当天标题" value={selectedDay.title} onChange={(event) => updateSelectedDay((day) => ({ ...day, title: event.target.value }))} />{!readOnly && <span className="edit-hint">↗</span>}</div>
               <input className="subtitle-input" readOnly={readOnly} aria-label="编辑当天副标题" value={selectedDay.subtitle} onChange={(event) => updateSelectedDay((day) => ({ ...day, subtitle: event.target.value }))} />
             </div>
-            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => openPlaceSearch()}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "正在补齐全程路线…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
+            <div className="editor-actions">{!readOnly && <button className="ghost-button" type="button" onClick={() => openPlaceSearch()}>＋ 添加地点</button>}{!readOnly && <button className="ghost-button" type="button" onClick={() => setShowCopyRoadbook(true)}>⧉ 复制当前路书</button>}<button className="export-button" type="button" onClick={exportPdf}>↗ 导出 PDF</button>{!readOnly && <button className="share-button" type="button" disabled={isPreparingShare} onClick={() => void shareRoadbook()}>{isPreparingShare ? "正在补齐全程路线…" : "↗ 分享路书"}</button>}{readOnly && <button className="share-button" type="button" onClick={() => void shareRoadbook()}>↗ 复制分享链接</button>}{!readOnly && <button className="primary-button" type="button" onClick={saveTrip}>保存路书 <span>⌘ S</span></button>}<a className="mobile-navigation-button" href={amapNavigationUrl(selectedDay.stops)} onClick={(event) => navigateWithAmapApp(event, selectedDay.stops)} target="_blank" rel="noreferrer">↗ 高德导航</a></div>
           </div>
 
           <div className="stats-strip"><div className="date-stat"><span className="stat-label">当日日期</span><input className="departure-date" readOnly={readOnly} disabled={readOnly} type="date" value={selectedDayDateValue} aria-label="修改当日日期" onInput={(event) => updateSelectedDayDate(event.currentTarget.value)} /></div><div><span className="stat-label">总里程</span><strong>{routeDistance}</strong></div><div><span className="stat-label">预计驾驶</span><strong>{routeDuration}</strong></div><div><span className="stat-label">游玩停留</span><strong>{dayStaySeconds ? formatDuration(dayStaySeconds) : "未安排"}</strong></div><div><span className="stat-label">预计结束</span><strong>{dayEndTime || "待规划"}</strong></div><div><span className="stat-label">当日高速费</span><strong>{routeSummary ? formatTolls(routeSummary.tolls) : readOnly ? "未记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待获取"}</strong></div><div className="cumulative-toll-stat"><span className="stat-label">截至当前累计高速费</span><button className="cumulative-toll-button" type="button" onClick={() => setShowCumulativeTolls(true)} aria-haspopup="dialog">{cumulativeTollsComplete ? `${formatTolls(cumulativeTollsAmount)} · 查看` : readOnly ? "未记录 · 查看" : selectedDayHasRouteError ? "正在重试… · 查看" : amapLoaded ? "计算中…" : "点击计算"}</button></div><div className="cumulative-distance-stat"><span className="stat-label">截至当前累计总里程</span><strong>{cumulativeDistanceSummary.complete ? formatKilometers(cumulativeDistanceSummary.distance) : readOnly ? "未完整记录" : selectedDayHasRouteError ? "正在重试…" : amapLoaded ? "计算中…" : "待连接高德"}</strong></div></div>
@@ -2795,7 +2845,7 @@ export default function Home() {
             </div>
             <div className="map-host" ref={mapContainer} />
           </div>
-          <div className="map-bottom"><div className="legend"><span><i className="legend-dot orange" />{isRoadbookOverview ? "每日出发点" : "行程地点"}</span><span><i className="legend-dot green" />{isRoadbookOverview ? "全程路线分段" : "住宿"}</span></div><a href={amapNavigationUrl(isRoadbookOverview ? overviewStops : selectedDay.stops)} target="_blank" rel="noreferrer">{isRoadbookOverview ? "在高德中查看起终点" : "在高德中导航"} ↗</a></div>
+          <div className="map-bottom"><div className="legend"><span><i className="legend-dot orange" />{isRoadbookOverview ? "每日出发点" : "行程地点"}</span><span><i className="legend-dot green" />{isRoadbookOverview ? "全程路线分段" : "住宿"}</span></div><a href={amapNavigationUrl(mapNavigationStops)} onClick={(event) => navigateWithAmapApp(event, mapNavigationStops)} target="_blank" rel="noreferrer">{isRoadbookOverview ? "在高德中查看起终点" : "在高德中导航"} ↗</a></div>
         </section>
       </div>
 
