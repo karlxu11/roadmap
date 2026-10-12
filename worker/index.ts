@@ -85,7 +85,7 @@ type ShareSnapshot = {
   paths?: Record<string, Array<[number, number]>>;
   createdAt: string;
 };
-type ShareLinkRecord = { token: string; roadbookId: string; roadbookTitle: string; createdAt: string; expiresAt: string; permanent?: boolean; ownerId?: string };
+type ShareLinkRecord = { token: string; alias?: string; revoked?: boolean; roadbookId: string; roadbookTitle: string; createdAt: string; expiresAt: string; permanent?: boolean; ownerId?: string };
 type AMapSearchPayload = { status?: string; info?: string; pois?: unknown[]; [key: string]: unknown };
 type AMapCredentials = { jsKey: string; securityCode: string; webKey: string };
 type UserRecord = {
@@ -671,7 +671,8 @@ async function deleteUserSessions(env: Env, userId: string) {
 
 async function deleteUserData(env: Env, user: UserRecord) {
   if (!env.ROADBOOK_KV) return;
-  const ownedLinks = (await readShareIndex(env)).filter((link) => link.ownerId === user.id);
+  const shareIndex = await readShareIndex(env);
+  const ownedLinks = shareIndex.filter((link) => link.ownerId === user.id);
   await Promise.all([
     env.ROADBOOK_KV.delete(userByUsernameKey(user.username)),
     env.ROADBOOK_KV.delete(userByIdKey(user.id)),
@@ -684,7 +685,11 @@ async function deleteUserData(env: Env, user: UserRecord) {
       ...ownedLinks.map((link) => `${SHARE_STORAGE_PREFIX}${link.token}`),
     ]),
   ]);
-  if (ownedLinks.length) await writeShareIndex(env, (await readShareIndex(env)).filter((link) => link.ownerId !== user.id));
+  if (ownedLinks.length) {
+    const retained = shareIndex.filter((link) => link.ownerId !== user.id);
+    const aliasReservations = ownedLinks.filter((link) => link.alias).map((link) => ({ ...link, revoked: true }));
+    await writeShareIndex(env, [...retained, ...aliasReservations]);
+  }
 }
 
 async function writeShareIndex(env: Env, links: ShareLinkRecord[]) {
@@ -701,6 +706,38 @@ function isStaticAssetPath(pathname: string) {
 
 function isShareToken(value: string) {
   return /^[A-Za-z0-9_-]{16,64}$/.test(value);
+}
+
+function normalizeShareAlias(value: string) {
+  const trimmed = value.normalize("NFKC").trim();
+  if (!trimmed) return "";
+  const alias = trimmed.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
+  const length = [...alias].length;
+  return length >= 2 && length <= 32 ? alias : null;
+}
+
+const SHARE_ALIAS_ADJECTIVES = ["blue", "quiet", "sunny", "happy", "little", "green", "warm", "bright", "swift", "soft", "golden", "gentle"];
+const SHARE_ALIAS_NOUNS = ["river", "panda", "cloud", "maple", "island", "breeze", "trail", "peach", "harbor", "sunset", "forest", "comet"];
+
+function randomInteger(max: number) {
+  const bytes = new Uint32Array(1);
+  crypto.getRandomValues(bytes);
+  return bytes[0] % max;
+}
+
+function generateShareAlias(index: ShareLinkRecord[], token: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const alias = `${SHARE_ALIAS_ADJECTIVES[randomInteger(SHARE_ALIAS_ADJECTIVES.length)]}-${SHARE_ALIAS_NOUNS[randomInteger(SHARE_ALIAS_NOUNS.length)]}-${randomInteger(90) + 10}`;
+    if (!index.some((link) => link.alias === alias || link.token === alias) && alias !== token) return alias;
+  }
+  throw new Error("share_alias_generation_failed");
+}
+
+async function resolveShareReference(env: Env, reference: string) {
+  const index = await readShareIndex(env);
+  const aliasLink = index.find((link) => link.alias === reference);
+  if (aliasLink) return aliasLink.revoked ? null : aliasLink.token;
+  return isShareToken(reference) ? reference : null;
 }
 
 function isInlineShareSnapshot(value: string) {
@@ -720,9 +757,11 @@ async function isPublicShareRequest(url: URL, method: string, env: Env) {
   const parameter = url.pathname === "/" ? url.searchParams.get("share") : url.pathname === "/api/shares" ? url.searchParams.get("token") : null;
   if (!parameter) return false;
   if (url.pathname === "/" && isInlineShareSnapshot(parameter)) return true;
-  if (!isShareToken(parameter) || !env.ROADBOOK_KV) return false;
+  if (!env.ROADBOOK_KV) return false;
 
-  const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${parameter}`, "json");
+  const token = await resolveShareReference(env, parameter);
+  if (!token) return false;
+  const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`, "json");
   return isShareSnapshot(snapshot);
 }
 
@@ -904,22 +943,31 @@ const worker = {
 
     if (url.pathname === "/api/shares" && request.method === "POST") {
       if (!env.ROADBOOK_KV) return Response.json({ ok: false, error: "storage_unconfigured" }, { status: 503 });
-      let snapshot: unknown;
+      let payload: unknown;
       try {
-        snapshot = await request.json();
+        payload = await request.json();
       } catch {
         return Response.json({ ok: false, error: "invalid_json" }, { status: 400 });
       }
+      const requestBody = payload && typeof payload === "object" ? payload as { snapshot?: unknown; alias?: unknown } : {};
+      const snapshot = isShareSnapshot(payload) ? payload : requestBody.snapshot;
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "invalid_snapshot" }, { status: 400 });
+      if (requestBody.alias !== undefined && typeof requestBody.alias !== "string") return Response.json({ ok: false, error: "invalid_alias" }, { status: 400 });
+      const requestedAlias = normalizeShareAlias(typeof requestBody.alias === "string" ? requestBody.alias : "");
+      if (requestedAlias === null) return Response.json({ ok: false, error: "invalid_alias" }, { status: 400 });
       const tokenBytes = new Uint8Array(18);
       crypto.getRandomValues(tokenBytes);
       const token = toBase64Url(tokenBytes);
+      const index = await readShareIndex(env);
+      const alias = requestedAlias || generateShareAlias(index, token);
+      if (index.some((link) => link.alias === alias || link.token === alias) || alias === token) {
+        return Response.json({ ok: false, error: "alias_taken" }, { status: 409, headers: { "Cache-Control": "no-store" } });
+      }
       const expiresAt = new Date(Date.now() + SHARE_LINK_TTL * 1000).toISOString();
       await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: SHARE_LINK_TTL });
-      const index = await readShareIndex(env);
-      await writeShareIndex(env, [{ token, roadbookId: snapshot.roadbook.id ?? "", roadbookTitle: snapshot.roadbook.title ?? "未命名路书", createdAt: snapshot.createdAt, expiresAt, ...(currentUser ? { ownerId: currentUser.id } : {}) }, ...index.filter((link) => link.token !== token)]);
+      await writeShareIndex(env, [{ token, alias, roadbookId: snapshot.roadbook.id ?? "", roadbookTitle: snapshot.roadbook.title ?? "未命名路书", createdAt: snapshot.createdAt, expiresAt, ...(currentUser ? { ownerId: currentUser.id } : {}) }, ...index.filter((link) => link.token !== token)]);
       ctx.waitUntil(prepareShareSnapshot(env, token, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)));
-      return Response.json({ ok: true, token }, { headers: { "Cache-Control": "no-store" } });
+      return Response.json({ ok: true, token, alias }, { headers: { "Cache-Control": "no-store" } });
     }
 
     if (url.pathname === "/api/shares" && request.method === "PUT") {
@@ -954,12 +1002,14 @@ const worker = {
       const token = url.searchParams.get("token")?.trim() ?? "";
       if (!token) {
         const links = await readShareIndex(env);
-        return Response.json({ ok: true, links: accountMode && currentUser ? links.filter((link) => link.ownerId === currentUser.id) : links }, { headers: { "Cache-Control": "no-store" } });
+        const visibleLinks = links.filter((link) => !link.revoked);
+        return Response.json({ ok: true, links: accountMode && currentUser ? visibleLinks.filter((link) => link.ownerId === currentUser.id) : visibleLinks }, { headers: { "Cache-Control": "no-store" } });
       }
-      if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) return Response.json({ ok: false, error: "invalid_token" }, { status: 400 });
-      const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${token}`, "json");
+      const resolvedToken = await resolveShareReference(env, token);
+      if (!resolvedToken) return Response.json({ ok: false, error: "share_not_found" }, { status: 404, headers: { "Cache-Control": "no-store" } });
+      const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${resolvedToken}`, "json");
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
-      if (currentUser || !accountMode) ctx.waitUntil(prepareShareSnapshot(env, token, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)).catch(() => undefined));
+      if (currentUser || !accountMode) ctx.waitUntil(prepareShareSnapshot(env, resolvedToken, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)).catch(() => undefined));
       return Response.json({ ok: true, snapshot }, { headers: { "Cache-Control": "no-store" } });
     }
 
@@ -972,7 +1022,11 @@ const worker = {
       const existingLink = (await readShareIndex(env)).find((link) => link.token === token);
       if (accountMode && (!currentUser || existingLink?.ownerId !== currentUser.id)) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
       await env.ROADBOOK_KV.delete(`${SHARE_STORAGE_PREFIX}${token}`);
-      await writeShareIndex(env, (await readShareIndex(env)).filter((link) => link.token !== token));
+      const index = await readShareIndex(env);
+      await writeShareIndex(env, index.flatMap((link) => {
+        if (link.token !== token) return [link];
+        return link.alias ? [{ ...link, revoked: true }] : [];
+      }));
       return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     }
 

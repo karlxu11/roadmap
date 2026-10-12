@@ -52,6 +52,7 @@ type SharedSnapshot = {
 };
 type ShareLink = {
   token?: string;
+  alias?: string;
   url: string;
   roadbookId: string;
   roadbookTitle: string;
@@ -371,8 +372,9 @@ function hasShareQuery() {
   return typeof window !== "undefined" && new URLSearchParams(window.location.search).has(SHARE_QUERY_KEY);
 }
 
-function isCloudShareToken(value: string) {
-  return /^[A-Za-z0-9_-]{16,64}$/.test(value);
+function isCloudShareReference(value: string) {
+  const aliasLength = [...value].length;
+  return /^[A-Za-z0-9_-]{16,64}$/.test(value) || (aliasLength >= 2 && aliasLength <= 32 && /^[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*$/u.test(value));
 }
 
 function expectedShareLegCount(roadbook: Roadbook) {
@@ -1329,7 +1331,7 @@ export default function Home() {
     if (hasShareQuery()) {
       const encodedShare = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get(SHARE_QUERY_KEY) ?? "";
       const inlineShare = decodeShareSnapshot(encodedShare);
-      const canPollShare = Boolean(encodedShare && !inlineShare && isCloudShareToken(encodedShare));
+      const canPollShare = Boolean(encodedShare && !inlineShare && isCloudShareReference(encodedShare));
       let applied = false;
       let pollAttempts = 0;
       let pollTimer: number | null = null;
@@ -1794,11 +1796,12 @@ export default function Home() {
     flash("已改用云端路书");
   }
 
-  function shareUrlForToken(token: string) {
+  function shareUrlForReference(reference: string) {
     const url = new URL(window.location.href);
     url.search = "";
-    url.searchParams.set(SHARE_QUERY_KEY, token);
     url.hash = "";
+    if ([...reference].some((character) => character.charCodeAt(0) > 127)) return `${url.origin}${url.pathname}?${SHARE_QUERY_KEY}=${reference}`;
+    url.searchParams.set(SHARE_QUERY_KEY, reference);
     return url.toString();
   }
 
@@ -1816,7 +1819,7 @@ export default function Home() {
       const response = await fetch("/api/shares", { headers: { Accept: "application/json" }, cache: "no-store" });
       if (!response.ok) return;
       const payload = await response.json() as { links?: Array<Omit<ShareLink, "url" | "storage"> & { token: string }> };
-      const cloudLinks: ShareLink[] = (payload.links ?? []).map((link) => ({ ...link, url: shareUrlForToken(link.token), storage: "cloud" }));
+      const cloudLinks: ShareLink[] = (payload.links ?? []).map((link) => ({ ...link, url: shareUrlForReference(link.alias ?? link.token), storage: "cloud" }));
       const browserLinks = localLinks.filter((link) => link.storage === "browser");
       const next = [...cloudLinks, ...browserLinks.filter((link) => !cloudLinks.some((cloudLink) => cloudLink.token === link.token))];
       saveLocalShareLinks(next, storageScope);
@@ -1876,7 +1879,7 @@ export default function Home() {
   async function relinkShareToRoadbook(link: ShareLink, snapshot: SharedSnapshot, roadbook: Roadbook): Promise<{ ok: boolean; url?: string }> {
     const nextSnapshot = snapshotForImportedRoadbook(snapshot, roadbook);
     if (link.storage === "browser") {
-      return { ok: true, url: shareUrlForToken(encodeShareSnapshot(nextSnapshot)) };
+      return { ok: true, url: shareUrlForReference(encodeShareSnapshot(nextSnapshot)) };
     }
     if (!link.token) return { ok: false };
     try {
@@ -1886,7 +1889,7 @@ export default function Home() {
         body: JSON.stringify(nextSnapshot),
         cache: "no-store",
       });
-      return { ok: response.ok };
+      return { ok: response.ok, ...(response.ok ? { url: shareUrlForReference(link.alias ?? link.token) } : {}) };
     } catch {
       return { ok: false };
     }
@@ -2504,7 +2507,7 @@ export default function Home() {
     const localLinks = loadLocalShareLinks(storageScope);
     const browserUpdates = localLinks.map((link) => {
       if (link.storage !== "browser" || link.roadbookId !== roadbook.id) return link;
-      return { ...link, url: shareUrlForToken(encodeShareSnapshot(snapshot)), roadbookTitle: roadbook.title };
+      return { ...link, url: shareUrlForReference(encodeShareSnapshot(snapshot)), roadbookTitle: roadbook.title };
     });
     const browserUpdatedCount = browserUpdates.filter((link, index) => link.url !== localLinks[index]?.url).length;
     if (browserUpdatedCount) {
@@ -2562,6 +2565,8 @@ export default function Home() {
       return;
     }
     if (isPreparingShare) return;
+    const customAlias = window.prompt("给分享链接起个好记的别名，支持中文、英文和数字；留空会自动生成。", "");
+    if (customAlias === null) return;
     setIsPreparingShare(true);
     try {
       // 先复用本地缓存，仅为缺少轨迹的路段补拉高德路径，保证分享页不会退化为地点直连线。
@@ -2570,31 +2575,50 @@ export default function Home() {
       const missingCount = preparation.missingCount;
       let shareUrl = "";
       let shareToken = "";
+      let shareAlias = "";
+      let requestedAlias = customAlias;
+      let cancelled = false;
       try {
-        const response = await fetch("/api/shares", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify(snapshot),
-        });
-        if (response.ok) {
-          const payload = await response.json() as { token?: string };
-          if (payload.token) {
-            shareToken = payload.token;
-            const url = new URL(window.location.href);
-            url.search = "";
-            url.searchParams.set(SHARE_QUERY_KEY, payload.token);
-            url.hash = "";
-            shareUrl = url.toString();
+        while (true) {
+          const response = await fetch("/api/shares", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ snapshot, alias: requestedAlias }),
+          });
+          if (response.ok) {
+            const payload = await response.json() as { token?: string; alias?: string };
+            if (payload.token) {
+              shareToken = payload.token;
+              shareAlias = payload.alias ?? "";
+              shareUrl = shareUrlForReference(shareAlias || shareToken);
+            }
+            break;
           }
+          const payload = await response.json().catch(() => ({})) as { error?: string };
+          if (payload.error !== "alias_taken" && payload.error !== "invalid_alias") break;
+          const revisedAlias = window.prompt(
+            payload.error === "alias_taken" ? "这个别名已经被使用，请换一个；也可以留空自动生成。" : "别名需为 2 到 32 个中文、英文或数字，可用连字符分隔；请重新输入或留空自动生成。",
+            requestedAlias,
+          );
+          if (revisedAlias === null) {
+            cancelled = true;
+            break;
+          }
+          requestedAlias = revisedAlias;
         }
       } catch {
         // Local development without KV falls back to the legacy inline snapshot link.
       }
+      if (cancelled) {
+        flash("已取消创建分享链接");
+        return;
+      }
       if (!shareUrl) {
-        shareUrl = shareUrlForToken(encodeShareSnapshot(snapshot));
+        shareUrl = shareUrlForReference(encodeShareSnapshot(snapshot));
       }
       rememberShareLink({
         token: shareToken || undefined,
+        alias: shareAlias || undefined,
         url: shareUrl,
         roadbookId: activeRoadbook.id,
         roadbookTitle: activeRoadbook.title,
@@ -2604,7 +2628,8 @@ export default function Home() {
       });
       try {
         await navigator.clipboard.writeText(shareUrl);
-        flash(missingCount ? `分享链接已复制，${missingCount} 条路线暂未能获取` : "分享链接已复制，可直接粘贴发送");
+        const localOnlyNotice = !shareToken ? "；云端分享未创建，此设备链接不支持别名" : "";
+        flash(missingCount ? `分享链接已复制，${missingCount} 条路线暂未能获取${localOnlyNotice}` : `分享链接已复制，可直接粘贴发送${localOnlyNotice}`);
       } catch {
         flash("复制失败，请检查浏览器剪贴板权限");
       }
@@ -2926,7 +2951,7 @@ function ShareManagerModal({ links, editableRoadbooks, isLoading, importingShare
   const linkCountLabel = isLoadingLinks ? "…" : String(links.length);
   const pendingImportLabel = isLoadingLinks ? "…" : String(pendingImportCount);
   const pendingImportClass = isLoadingLinks ? "pending" : pendingImportCount ? "warning" : "complete";
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card share-manager-modal" role="dialog" aria-modal="true" aria-labelledby="share-manager-title"><div className="modal-head"><div><span className="eyebrow">SHARE LINKS</span><h2 id="share-manager-title">分享管理</h2></div><div className="share-manager-head-actions">{pendingImportCount > 0 && <button className="import-all-share-button" type="button" disabled={isImporting} onClick={onImportAll}>{importingShareKey === "all" ? "正在导入…" : `导入全部 ${pendingImportCount} 条`}</button>}<button className="refresh-share-button" type="button" onClick={onRefresh} aria-label="刷新分享链接">↻</button><button type="button" className="modal-close" onClick={onClose}>×</button></div></div><p className="share-manager-lead">这里管理已经发出去的分享链接。每条链接都是当时的只读快照；可以把快照导入成一条独立的可编辑路书。云端链接默认有效期 30 天。</p><div className="collection-summary" aria-label="路书与分享链接数量"><div><strong>{editableRoadbooks.length}</strong><span>可编辑路书</span></div><div><strong>{linkCountLabel}</strong><span>分享链接</span></div><div className={pendingImportClass}><strong>{pendingImportLabel}</strong><span>待导入编辑</span></div></div><div className="share-explanation"><span aria-hidden="true">i</span><p>同一条路书可以生成多条链接。历史快照不会自动变成新的可编辑路书；多条链接若仍指向同一条路书，编辑时会互相覆盖。{pendingImportCount > 0 && `当前有 ${pendingImportCount} 条分享还没有独立的编辑源，可以逐条或全部导入。`}</p></div><div className="share-link-list">{isLoadingLinks ? <div className="share-manager-empty"><span>…</span><p>正在读取分享记录</p></div> : links.length ? links.map((link) => { const expired = !link.permanent && new Date(link.expiresAt).getTime() <= now; const hasIndependentSource = shareHasIndependentSource(link, links, editableRoadbooks); const linkKey = link.token ?? link.url; const importingThis = importingShareKey === linkKey; return <div className={`share-link-item ${expired ? "expired" : ""}`} key={linkKey}><div className="share-link-icon">↗</div><div className="share-link-copy"><strong>{link.roadbookTitle}</strong><small>{link.storage === "cloud" ? "云端链接" : "当前设备链接"} · 创建于 {new Date(link.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}</small><span>{link.permanent ? "长期有效" : expired ? "已过期" : `有效至 ${new Date(link.expiresAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`}</span><span className={`share-link-source ${hasIndependentSource ? "linked" : "unlinked"}`}>{hasIndependentSource ? "已有独立的可编辑路书" : "只读快照 · 还没有独立的可编辑路书"}</span></div><div className="share-link-actions">{hasIndependentSource ? <button type="button" onClick={() => onOpen(link)}>打开编辑</button> : <button className="import-share" type="button" disabled={isImporting} onClick={() => onImport(link)}>{importingThis ? "导入中…" : "导入编辑"}</button>}<button type="button" onClick={() => onCopy(link)}>复制</button><button className={link.storage === "cloud" && !expired ? "danger" : "muted"} type="button" onClick={() => onRevoke(link)}>{link.storage === "cloud" && !expired ? "失效" : "移除"}</button></div></div>; }) : <div className="share-manager-empty"><span>↗</span><p>还没有创建过分享链接</p><small>在路书编辑页点击“分享路书”后，链接会出现在这里。</small></div>}</div><div className="modal-foot">导入后会新增一条可编辑路书，并让这条分享指向它；之后保存会同步到该链接。当前设备链接是未配置 KV 时的本地备用方案。</div></div></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card share-manager-modal" role="dialog" aria-modal="true" aria-labelledby="share-manager-title"><div className="modal-head"><div><span className="eyebrow">SHARE LINKS</span><h2 id="share-manager-title">分享管理</h2></div><div className="share-manager-head-actions">{pendingImportCount > 0 && <button className="import-all-share-button" type="button" disabled={isImporting} onClick={onImportAll}>{importingShareKey === "all" ? "正在导入…" : `导入全部 ${pendingImportCount} 条`}</button>}<button className="refresh-share-button" type="button" onClick={onRefresh} aria-label="刷新分享链接">↻</button><button type="button" className="modal-close" onClick={onClose}>×</button></div></div><p className="share-manager-lead">这里管理已经发出去的分享链接。每条链接都是当时的只读快照；可以把快照导入成一条独立的可编辑路书。云端链接默认有效期 30 天。</p><div className="collection-summary" aria-label="路书与分享链接数量"><div><strong>{editableRoadbooks.length}</strong><span>可编辑路书</span></div><div><strong>{linkCountLabel}</strong><span>分享链接</span></div><div className={pendingImportClass}><strong>{pendingImportLabel}</strong><span>待导入编辑</span></div></div><div className="share-explanation"><span aria-hidden="true">i</span><p>同一条路书可以生成多条链接。历史快照不会自动变成新的可编辑路书；多条链接若仍指向同一条路书，编辑时会互相覆盖。{pendingImportCount > 0 && `当前有 ${pendingImportCount} 条分享还没有独立的编辑源，可以逐条或全部导入。`}</p></div><div className="share-link-list">{isLoadingLinks ? <div className="share-manager-empty"><span>…</span><p>正在读取分享记录</p></div> : links.length ? links.map((link) => { const expired = !link.permanent && new Date(link.expiresAt).getTime() <= now; const hasIndependentSource = shareHasIndependentSource(link, links, editableRoadbooks); const linkKey = link.token ?? link.url; const importingThis = importingShareKey === linkKey; return <div className={`share-link-item ${expired ? "expired" : ""}`} key={linkKey}><div className="share-link-icon">↗</div><div className="share-link-copy"><strong>{link.roadbookTitle}</strong><small>{link.storage === "cloud" ? "云端链接" : "当前设备链接"} · 创建于 {new Date(link.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}</small><small>{link.alias ? `别名：${link.alias}` : "未设置别名"}</small><span>{link.permanent ? "长期有效" : expired ? "已过期" : `有效至 ${new Date(link.expiresAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}`}</span><span className={`share-link-source ${hasIndependentSource ? "linked" : "unlinked"}`}>{hasIndependentSource ? "已有独立的可编辑路书" : "只读快照 · 还没有独立的可编辑路书"}</span></div><div className="share-link-actions">{hasIndependentSource ? <button type="button" onClick={() => onOpen(link)}>打开编辑</button> : <button className="import-share" type="button" disabled={isImporting} onClick={() => onImport(link)}>{importingThis ? "导入中…" : "导入编辑"}</button>}<button type="button" onClick={() => onCopy(link)}>复制</button><button className={link.storage === "cloud" && !expired ? "danger" : "muted"} type="button" onClick={() => onRevoke(link)}>{link.storage === "cloud" && !expired ? "失效" : "移除"}</button></div></div>; }) : <div className="share-manager-empty"><span>↗</span><p>还没有创建过分享链接</p><small>在路书编辑页点击“分享路书”后，链接会出现在这里。</small></div>}</div><div className="modal-foot">导入后会新增一条可编辑路书，并让这条分享指向它；之后保存会同步到该链接。当前设备链接是未配置 KV 时的本地备用方案。</div></div></div>;
 }
 
 function SettingsModal({ settings, onClose, onSave }: { settings: { jsKey: string; securityCode: string; webKey: string }; onClose: () => void; onSave: (settings: { jsKey: string; securityCode: string; webKey: string }) => void }) {
