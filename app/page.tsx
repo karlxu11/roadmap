@@ -1672,7 +1672,7 @@ export default function Home() {
   }, [amapLoaded, readOnly, deferredSelectedDayRouteDependencyKey, routeRetryVersion, storageStatus]);
 
   useEffect(() => {
-    if (readOnly || hasShareQuery() || storageStatus === "loading") return;
+    if (readOnly || hasShareQuery() || !isRoadbookOverview || storageStatus === "loading") return;
     let cancelled = false;
     let startTimer: number | null = null;
     let retryTimer: number | null = null;
@@ -1731,7 +1731,7 @@ export default function Home() {
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amapLoaded, readOnly, deferredRoutePlanDependencyKey, selectedDay.id, routeRetryVersion, storageStatus]);
+  }, [amapLoaded, isRoadbookOverview, readOnly, deferredRoutePlanDependencyKey, selectedDay.id, routeRetryVersion, storageStatus]);
 
   function updateEditorWidth(clientX: number) {
     const workspace = workspaceRef.current;
@@ -2758,14 +2758,22 @@ export default function Home() {
 
           <button className={`roadbook-distance-summary ${roadbookDistanceSummary.complete ? "ready" : "pending"} ${isRoadbookOverview ? "selected" : ""}`} type="button" onClick={() => readOnly ? setShareMapMode("overview") : setEditorMapMode("overview")} aria-pressed={isRoadbookOverview} aria-label="查看全程地图总览">
             <span className="roadbook-overview-icon" aria-hidden="true">⌁</span><span className="roadbook-distance-summary-label">全程地图总览</span>
-            <strong>{roadbookDistanceSummary.complete ? formatKilometers(roadbookDistanceSummary.distance) : readOnly ? "未完整记录" : amapLoaded ? "计算中…" : "待连接高德"}</strong>
+            <strong>{roadbookDistanceSummary.complete ? formatKilometers(roadbookDistanceSummary.distance) : readOnly ? "未完整记录" : amapLoaded ? isRoadbookOverview ? "计算中…" : "查看总览计算" : "待连接高德"}</strong>
             <span className="roadbook-distance-summary-arrow" aria-hidden="true">{isRoadbookOverview ? "已查看" : "查看 →"}</span>
           </button>
           <div className="day-list-header"><span>行程安排</span><span className="day-count">{days.length} DAYS</span></div>
           <div className="day-list">
             {days.map((day, index) => {
               const distanceSummary = dayDistanceById[day.id];
-              const distanceLabel = distanceSummary?.complete ? formatKilometers(distanceSummary.distance) : readOnly ? "未记录" : amapLoaded ? "计算中…" : "待计算";
+              const distanceLabel = distanceSummary?.complete
+                ? formatKilometers(distanceSummary.distance)
+                : readOnly
+                  ? "未记录"
+                  : !amapLoaded
+                    ? "待计算"
+                    : isRoadbookOverview || day.id === selectedDay.id
+                      ? "计算中…"
+                      : "切换日期计算";
               return <div className="day-wrap" key={day.id}>
                 <button className={`day-card ${selectedDayId === day.id && !isRoadbookOverview ? "selected" : ""}`} type="button" onClick={() => { setSelectedDayId(day.id); if (readOnly) setShareMapMode("day"); else setEditorMapMode("day"); }}>
                   <span className="day-number">{String(index + 1).padStart(2, "0")}</span>

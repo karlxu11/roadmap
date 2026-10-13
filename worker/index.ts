@@ -66,6 +66,7 @@ const PASSWORD_HASH_ITERATIONS = 100_000;
 const adminBootstrapPromises = new WeakMap<object, Promise<void>>();
 const adminUserCache = new WeakMap<object, { user: UserRecord | null; expiresAt: number }>();
 const ADMIN_USER_CACHE_TTL = 60 * 1000;
+const sharePreparationPromises = new WeakMap<object, Map<string, Promise<void>>>();
 
 type NormalizedRoute = {
   status: "1";
@@ -275,6 +276,32 @@ async function prepareShareSnapshot(env: Env, token: string, initial: ShareSnaps
     }
   });
   await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: 60 * 60 * 24 * 30 });
+}
+
+function prepareShareSnapshotOnce(env: Env, token: string, snapshot: ShareSnapshot, credentials?: AMapCredentials, cacheScope = "") {
+  const namespace = kvObject(env);
+  if (!namespace) return Promise.resolve();
+
+  let pending = sharePreparationPromises.get(namespace);
+  if (!pending) {
+    pending = new Map();
+    sharePreparationPromises.set(namespace, pending);
+  }
+
+  // Share-page polling can read the same incomplete snapshot several times
+  // while route preparation is still running. Coalesce only identical snapshot
+  // versions so an edit to the same link can still prepare its newer contents.
+  const key = `${token}:${snapshot.createdAt}`;
+  const existing = pending.get(key);
+  if (existing) return existing;
+
+  let preparation: Promise<void>;
+  preparation = prepareShareSnapshot(env, token, snapshot, credentials, cacheScope).finally(() => {
+    if (pending?.get(key) === preparation) pending.delete(key);
+    if (pending?.size === 0) sharePreparationPromises.delete(namespace);
+  });
+  pending.set(key, preparation);
+  return preparation;
 }
 
 function toBase64Url(bytes: Uint8Array) {
@@ -966,7 +993,7 @@ const worker = {
       const expiresAt = new Date(Date.now() + SHARE_LINK_TTL * 1000).toISOString();
       await env.ROADBOOK_KV.put(`${SHARE_STORAGE_PREFIX}${token}`, JSON.stringify(snapshot), { expirationTtl: SHARE_LINK_TTL });
       await writeShareIndex(env, [{ token, alias, roadbookId: snapshot.roadbook.id ?? "", roadbookTitle: snapshot.roadbook.title ?? "未命名路书", createdAt: snapshot.createdAt, expiresAt, ...(currentUser ? { ownerId: currentUser.id } : {}) }, ...index.filter((link) => link.token !== token)]);
-      ctx.waitUntil(prepareShareSnapshot(env, token, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)));
+      ctx.waitUntil(prepareShareSnapshotOnce(env, token, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)));
       return Response.json({ ok: true, token, alias }, { headers: { "Cache-Control": "no-store" } });
     }
 
@@ -993,7 +1020,7 @@ const worker = {
         existingLink?.permanent ? undefined : { expirationTtl: SHARE_LINK_TTL },
       );
       await writeShareIndex(env, index.map((link) => link.token === token ? { ...link, roadbookId: snapshot.roadbook.id ?? link.roadbookId, roadbookTitle: snapshot.roadbook.title ?? link.roadbookTitle } : link));
-      ctx.waitUntil(prepareShareSnapshot(env, token, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)).catch(() => undefined));
+      ctx.waitUntil(prepareShareSnapshotOnce(env, token, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)).catch(() => undefined));
       return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     }
 
@@ -1009,7 +1036,7 @@ const worker = {
       if (!resolvedToken) return Response.json({ ok: false, error: "share_not_found" }, { status: 404, headers: { "Cache-Control": "no-store" } });
       const snapshot = await env.ROADBOOK_KV.get(`${SHARE_STORAGE_PREFIX}${resolvedToken}`, "json");
       if (!isShareSnapshot(snapshot)) return Response.json({ ok: false, error: "share_not_found" }, { status: 404 });
-      if (currentUser || !accountMode) ctx.waitUntil(prepareShareSnapshot(env, resolvedToken, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)).catch(() => undefined));
+      if (currentUser || !accountMode) ctx.waitUntil(prepareShareSnapshotOnce(env, resolvedToken, snapshot, currentUser ? getAmapCredentials(env, currentUser) : envAmapCredentials(env), amapCacheScope(currentUser)).catch(() => undefined));
       return Response.json({ ok: true, snapshot }, { headers: { "Cache-Control": "no-store" } });
     }
 
